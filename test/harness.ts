@@ -1,7 +1,7 @@
 /**
  * Shared test harness.
  *
- * Two pieces, and every other work package tests against both:
+ * Two pieces, and every module tests against both:
  *
  *   `harness()`      — the real GitHubMcplServer over an in-memory stream
  *                      pair, driven the way an MCPL host drives it. Same API
@@ -64,8 +64,8 @@ export interface RecordedCall {
   args: unknown[];
 }
 
-export const TEST_REPO: RepoRef = { owner: 'anima-research', name: 'rayforce' };
-export const TEST_BOT: BotIdentity = { login: 'rayforce-clone[bot]', id: 9001, isBot: true };
+export const TEST_REPO: RepoRef = { owner: 'anima-research', name: 'example-repo' };
+export const TEST_BOT: BotIdentity = { login: 'example-agent[bot]', id: 9001, isBot: true };
 
 function humanActor(login: string): EventActor {
   return { login, isBot: false };

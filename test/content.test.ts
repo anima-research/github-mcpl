@@ -38,10 +38,10 @@ import {
   renderThread,
 } from '../src/content.js';
 
-const REPO: RepoRef = { owner: 'anima-research', name: 'rayforce' };
+const REPO: RepoRef = { owner: 'anima-research', name: 'example-repo' };
 const ISSUE: ThreadRef = { repo: REPO, number: 7, kind: 'issue' };
 const PULL: ThreadRef = { repo: REPO, number: 12, kind: 'pull' };
-const URL = 'https://github.com/anima-research/rayforce/issues/7';
+const URL = 'https://github.com/anima-research/example-repo/issues/7';
 
 /** One repeated character, so the longest run of it is the longest body shown. */
 const FILL = 'z';
@@ -163,8 +163,8 @@ for (const row of RENDER_TABLE) {
 
     // The header line: repo#number (or repo, for a threadless event), kind,
     // actor, link.
-    if (ev.thread) assert.ok(header.startsWith(`anima-research/rayforce#${ev.thread.number} `), header);
-    else assert.ok(header.startsWith('anima-research/rayforce '), header);
+    if (ev.thread) assert.ok(header.startsWith(`anima-research/example-repo#${ev.thread.number} `), header);
+    else assert.ok(header.startsWith('anima-research/example-repo '), header);
     assert.ok(header.includes(row.kind), header);
     assert.ok(header.includes(ev.actor.login), header);
     assert.ok(header.includes(ev.html_url), header);
@@ -435,7 +435,7 @@ function reviewComment(
 
 test('renderIssue shows state, author, labels and the body', () => {
   const text = only(renderIssue(issue({ state: 'closed', stateReason: 'not_planned' })));
-  assert.ok(text.includes('anima-research/rayforce#7 issue closed (not_planned)'), text);
+  assert.ok(text.includes('anima-research/example-repo#7 issue closed (not_planned)'), text);
   assert.ok(text.includes('Rate limiter drops bursts'));
   assert.ok(text.includes('author: alice'));
   assert.ok(text.includes('labels: bug'));
@@ -477,7 +477,7 @@ test('renderThread bounds every comment body and caps the list', () => {
     comment({ id: 100 + i, body: HUGE_BODY }),
   );
   const text = only(renderThread(ISSUE, comments));
-  assert.ok(text.includes('anima-research/rayforce#7 issue: 62 comment(s)'), text.split('\n')[0]);
+  assert.ok(text.includes('anima-research/example-repo#7 issue: 62 comment(s)'), text.split('\n')[0]);
   assert.ok(longestBody(text) <= LIMITS.commentChars, String(longestBody(text)));
   assert.equal(text.match(/^#1\d\d by /gm)?.length, LIMITS.listEntries);
   assert.ok(text.includes(`and 12 more (showing ${LIMITS.listEntries} of 62)`), text.slice(-120));

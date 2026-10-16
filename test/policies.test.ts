@@ -12,7 +12,7 @@
  * agent-framework is not a dependency of this package — it is a sibling
  * checkout. When it cannot be found (a standalone clone, CI), these tests
  * skip with the paths they looked in; the contract checks in
- * wp8-docs.test.ts still run. Point GITHUB_MCPL_GATE_MODULE at
+ * docs.test.ts still run. Point GITHUB_MCPL_GATE_MODULE at
  * `dist/src/gate/event-gate.js` to force a location.
  */
 
@@ -158,7 +158,7 @@ const humanOpenedPull: GateEventInfo = {
 const humanMention: GateEventInfo = {
   ...base,
   eventType: 'mcpl:channel-incoming',
-  content: '@rayforce-clone can you look at the tsan failure?',
+  content: '@example-agent can you look at the tsan failure?',
   tags: ['chat:mention', 'chat:from-human', 'github:actor=maintainer'],
   metadata: { mentioned: true, isOwnThread: false, fromSelf: false, repo: 'owner/repo', number: 12 },
 };

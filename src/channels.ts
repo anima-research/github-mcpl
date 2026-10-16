@@ -1,5 +1,5 @@
 /**
- * Channels (TASK-SRHKG.1.5) — one MCPL channel per issue or pull request.
+ * Channels — one MCPL channel per issue or pull request.
  *
  * The contract's channel bullets, and nothing beyond them:
  *

@@ -1,6 +1,5 @@
 /**
- * state.ts — checkpoint lineage, rollback planning, and the atomic state file
- * (TASK-SRHKG.1.7).
+ * state.ts — checkpoint lineage, rollback planning, and the atomic state file.
  *
  * Every test works in its own temp directory; nothing here touches the network
  * or a real state file path.
@@ -14,7 +13,7 @@ import { test } from 'node:test';
 import { GithubState, ROOT_BUCKET, STATE_VERSION, type GithubStateSnapshot } from '../src/state.js';
 import { POLL_DEDUP_RING, POLL_HEAD_MEMORY, type Logger } from '../src/types.js';
 
-const REPO = 'anima-research/rayforce';
+const REPO = 'anima-research/example-repo';
 
 function tempFile(name = 'state.json'): string {
   return join(mkdtempSync(join(tmpdir(), 'github-mcpl-state-')), name);
@@ -264,17 +263,17 @@ test('the poll dedup ring remembers the last 2000 keys and no more', () => {
 
 test('the polled heads are bounded, survive a flush, and tolerate an older file (amendment 2a)', async () => {
   const state = GithubState.empty();
-  assert.equal(state.polledHead('github:anima-research/rayforce#58'), null);
-  state.setPolledHead('github:anima-research/rayforce#58', 'a'.repeat(40));
-  assert.equal(state.polledHead('github:anima-research/rayforce#58'), 'a'.repeat(40));
+  assert.equal(state.polledHead('github:anima-research/example-repo#58'), null);
+  state.setPolledHead('github:anima-research/example-repo#58', 'a'.repeat(40));
+  assert.equal(state.polledHead('github:anima-research/example-repo#58'), 'a'.repeat(40));
   // Last write wins: this is "the head the last pass saw", not a history.
-  state.setPolledHead('github:anima-research/rayforce#58', 'b'.repeat(40));
-  assert.equal(state.polledHead('github:anima-research/rayforce#58'), 'b'.repeat(40));
+  state.setPolledHead('github:anima-research/example-repo#58', 'b'.repeat(40));
+  assert.equal(state.polledHead('github:anima-research/example-repo#58'), 'b'.repeat(40));
 
   // Bounded, and the *oldest* entry is the one that goes.
   for (let i = 0; i < POLL_HEAD_MEMORY; i++) state.setPolledHead(`github:${REPO}#${1000 + i}`, 'c'.repeat(40));
   assert.equal(Object.keys(state.snapshot().pollHeads).length, POLL_HEAD_MEMORY);
-  assert.equal(state.polledHead('github:anima-research/rayforce#58'), null);
+  assert.equal(state.polledHead('github:anima-research/example-repo#58'), null);
   assert.equal(state.polledHead(`github:${REPO}#${1000 + POLL_HEAD_MEMORY - 1}`), 'c'.repeat(40));
 
   // Re-recording an unchanged head refreshes its place in the eviction order,
@@ -316,18 +315,18 @@ test('a state file written before amendment 2a still loads, with no heads known'
 test('a polled head round-trips through a flush (amendment 2a)', async () => {
   const file = tempFile();
   const first = GithubState.load(file, capturingLogger());
-  first.setPolledHead('github:anima-research/rayforce#58', 'e'.repeat(40));
+  first.setPolledHead('github:anima-research/example-repo#58', 'e'.repeat(40));
   await first.flush();
 
   const reloaded = GithubState.load(file, capturingLogger());
-  assert.equal(reloaded.polledHead('github:anima-research/rayforce#58'), 'e'.repeat(40));
+  assert.equal(reloaded.polledHead('github:anima-research/example-repo#58'), 'e'.repeat(40));
   // A non-string value in the file is dropped rather than trusted.
   const raw = readSnapshot(file) as unknown as { pollHeads: Record<string, unknown> };
-  raw.pollHeads['github:anima-research/rayforce#59'] = 42;
+  raw.pollHeads['github:anima-research/example-repo#59'] = 42;
   writeFileSync(file, JSON.stringify(raw));
   const third = GithubState.load(file, capturingLogger());
-  assert.equal(third.polledHead('github:anima-research/rayforce#59'), null);
-  assert.equal(third.polledHead('github:anima-research/rayforce#58'), 'e'.repeat(40));
+  assert.equal(third.polledHead('github:anima-research/example-repo#59'), null);
+  assert.equal(third.polledHead('github:anima-research/example-repo#58'), 'e'.repeat(40));
 });
 
 test('a checkpoint abandoned by an earlier rollback is refused, not accepted empty', () => {

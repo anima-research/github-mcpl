@@ -1,5 +1,5 @@
 /**
- * github.review (TASK-SRHKG.1.6).
+ * github.review.
  *
  * Three things are load-bearing here and each is asserted directly:
  *
@@ -98,7 +98,7 @@ test('create_review submits the inline comments with the exact positions', async
       { path: 'src/old.rs', line: 3, side: 'LEFT', body: 'why was this removed?' },
     ],
   } satisfies CreateReviewInput);
-  assert.match(out, /submitted commented review \d+ on anima-research\/rayforce#8 with 2 inline comments/);
+  assert.match(out, /submitted commented review \d+ on anima-research\/example-repo#8 with 2 inline comments/);
 
   // The fake opened one review thread per inline comment, at those positions.
   const threads = await api.listReviewThreads(PULL);
@@ -163,8 +163,8 @@ test('APPROVE on the bot’s own pull request is refused by name, nothing submit
   api.seedPullRequest({ number: 8, author: { login: TEST_BOT.login, isBot: true } });
 
   const out = failure(await reviewToolModule.call('create_review', { number: 8, event: 'APPROVE' }, ctx(api)));
-  assert.match(out, /create_review refused: APPROVE on anima-research\/rayforce#8 is this bot's own pull request/);
-  assert.match(out, /author rayforce-clone\[bot\]/);
+  assert.match(out, /create_review refused: APPROVE on anima-research\/example-repo#8 is this bot's own pull request/);
+  assert.match(out, /author example-agent\[bot\]/);
   assert.deepEqual(api.callLog(), ['getPullRequest'], 'the review was never created');
   assert.equal(api.submittedReviews().length, 0);
 });
@@ -176,13 +176,13 @@ test('REQUEST_CHANGES on the bot’s own pull request is refused too', async () 
   const out = failure(
     await reviewToolModule.call('create_review', { number: 8, event: 'REQUEST_CHANGES', body: 'no' }, ctx(api)),
   );
-  assert.match(out, /refused: REQUEST_CHANGES on anima-research\/rayforce#8 is this bot's own pull request/);
+  assert.match(out, /refused: REQUEST_CHANGES on anima-research\/example-repo#8 is this bot's own pull request/);
   assert.equal(api.submittedReviews().length, 0);
 });
 
 test('the own-pull-request check is case-insensitive, as GitHub logins are', async () => {
   const api = new FakeGitHubApi();
-  api.seedPullRequest({ number: 8, author: { login: 'RayForce-Clone[Bot]', isBot: true } });
+  api.seedPullRequest({ number: 8, author: { login: 'Example-Agent[Bot]', isBot: true } });
 
   const out = failure(await reviewToolModule.call('create_review', { number: 8, event: 'APPROVE' }, ctx(api)));
   assert.match(out, /refused: APPROVE on/);
@@ -297,14 +297,14 @@ test('resolve_thread and unresolve_thread move a thread of the named pull reques
   // `repo` omitted: the single allowed repository is the one membership is
   // established in.
   const resolved = ok(await reviewToolModule.call('resolve_thread', { number: 8, threadId: 'RT_kwDO' }, ctx(api)));
-  assert.equal(resolved, 'resolved review thread RT_kwDO on anima-research/rayforce#8');
+  assert.equal(resolved, 'resolved review thread RT_kwDO on anima-research/example-repo#8');
   assert.deepEqual(api.callLog(), ['listReviewThreads', 'resolveReviewThread']);
   assert.deepEqual(api.callsTo('listReviewThreads')[0].args, [PULL]);
   assert.deepEqual(api.callsTo('resolveReviewThread')[0].args, ['RT_kwDO']);
   assert.equal((await api.listReviewThreads(PULL))[0].isResolved, true);
 
   const unresolved = ok(await reviewToolModule.call('unresolve_thread', { number: 8, threadId: 'RT_kwDO' }, ctx(api)));
-  assert.equal(unresolved, 'unresolved review thread RT_kwDO on anima-research/rayforce#8');
+  assert.equal(unresolved, 'unresolved review thread RT_kwDO on anima-research/example-repo#8');
   assert.deepEqual(api.callsTo('unresolveReviewThread')[0].args, ['RT_kwDO']);
   assert.equal((await api.listReviewThreads(PULL))[0].isResolved, false);
 });
@@ -317,11 +317,11 @@ test('resolve_thread accepts the allowed repository named explicitly', async () 
   const out = ok(
     await reviewToolModule.call(
       'resolve_thread',
-      { repo: 'anima-research/rayforce', number: 8, threadId: 'RT_kwDO' },
+      { repo: 'anima-research/example-repo', number: 8, threadId: 'RT_kwDO' },
       ctx(api),
     ),
   );
-  assert.equal(out, 'resolved review thread RT_kwDO on anima-research/rayforce#8');
+  assert.equal(out, 'resolved review thread RT_kwDO on anima-research/example-repo#8');
   assert.equal((await api.listReviewThreads(PULL))[0].isResolved, true);
 });
 
@@ -338,7 +338,7 @@ test('resolve_thread refuses a node id that is not on the pull request', async (
   const out = failure(await reviewToolModule.call('resolve_thread', { number: 8, threadId: 'RT_foreign' }, ctx(api)));
   assert.match(
     out,
-    /resolve_thread refused: review thread "RT_foreign" is not one of the 1 review thread on anima-research\/rayforce#8/,
+    /resolve_thread refused: review thread "RT_foreign" is not one of the 1 review thread on anima-research\/example-repo#8/,
   );
   // Nothing was mutated: not the foreign thread, not the allowed one.
   assert.deepEqual(api.callLog(), ['listReviewThreads']);
@@ -367,7 +367,7 @@ test('a thread id on another pull request of the allowed repository is refused',
   api.seedReviewThread({ repo: TEST_REPO, number: 9, kind: 'pull' }, { id: 'RT_nine', isResolved: false });
 
   const out = failure(await reviewToolModule.call('resolve_thread', { number: 8, threadId: 'RT_nine' }, ctx(api)));
-  assert.match(out, /refused: review thread "RT_nine" is not one of the 0 review threads on anima-research\/rayforce#8/);
+  assert.match(out, /refused: review thread "RT_nine" is not one of the 0 review threads on anima-research\/example-repo#8/);
   assert.equal(api.callsTo('resolveReviewThread').length, 0);
 });
 

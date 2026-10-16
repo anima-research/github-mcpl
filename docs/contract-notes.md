@@ -1,6 +1,6 @@
 # Contract notes
 
-TASK-SRHKG.1's Contract section is frozen; it does not, however, fix every
+The original design contract is frozen; it does not, however, fix every
 type signature. This file records the decisions the .1 skeleton had to take so
 that .2 to .8 compile against one surface, and the places where a later work
 package may legitimately want to extend its own module instead.
@@ -43,7 +43,7 @@ camel case, so a reviewer can map a contract bullet to a type by sight.
   cursor.** Amendment 1 left the polling ingress unable to tell an opened
   issue from an edited one, so every open issue row arrived as `issue.edited`
   and a recipe keyed on `github:issue=opened` could never fire on it (found by
-  the WP10 end-to-end run). A `since` query still carries no action, but it
+  the first end-to-end run). A `since` query still carries no action, but it
   does carry `created_at`, and that is enough: `PolledIssue` gains `createdAt`
   and `normalizePolledIssue(repo, row, receivedAt, since, previousHeadSha?)`
   derives the kind from it.
@@ -70,7 +70,7 @@ camel case, so a reviewer can map a contract bullet to a type by sight.
   endpoint models no reply relation at all — an issue comment has no
   `in_reply_to_id` — so `isReplyToSelf` could only ever be true for a *review*
   comment, and every human answer to a comment the bot had made on an issue
-  reached the host as plain `chat:ambient` (also found by the WP10 run). A
+  reached the host as plain `chat:ambient` (also found by the first end-to-end run). A
   review comment keeps the exact rule (`inReplyTo ∈ botReviewIds`); a
   top-level comment gets one derived rule:
 

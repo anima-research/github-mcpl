@@ -1,6 +1,5 @@
 /**
- * tools-comments.ts — the `github.comments` tools and `state/rollback`
- * (TASK-SRHKG.1.7).
+ * tools-comments.ts — the `github.comments` tools and `state/rollback`.
  *
  * Everything runs against `FakeGitHubApi` and an in-memory {@link GithubState};
  * no octokit, no network. The tests drive the tools the way .9's routing will:
@@ -116,16 +115,16 @@ test('comment posts and books the new comment under the current checkpoint', asy
   f.api.seedIssue({ number: 7 });
   const base = f.state.createCheckpoint();
 
-  const result = await call(f, TOOL_COMMENT, { thread: 'anima-research/rayforce#7', body: 'hello' });
+  const result = await call(f, TOOL_COMMENT, { thread: 'anima-research/example-repo#7', body: 'hello' });
   assert.notEqual(result.isError, true);
   assert.deepEqual(await bodies(f.api, ISSUE), ['hello']);
 
   const booked = f.state.snapshot().created[base.id];
   assert.equal(booked.length, 1);
-  assert.equal(booked[0].repo, 'anima-research/rayforce');
+  assert.equal(booked[0].repo, 'anima-research/example-repo');
   assert.equal(booked[0].review, false);
   assert.deepEqual(booked[0].thread, { number: 7, kind: 'issue' });
-  assert.match(text(result), /commented on anima-research\/rayforce#7/);
+  assert.match(text(result), /commented on anima-research\/example-repo#7/);
 });
 
 test('comment accepts the short thread forms and refuses a foreign repository', async () => {
@@ -200,7 +199,7 @@ test('edit_own_comment rewrites the bot\'s comment and books the previous body',
   assert.notEqual(result.isError, true);
   assert.deepEqual(await bodies(f.api, ISSUE), ['second draft']);
   assert.deepEqual(f.state.snapshot().edited[base.id], [
-    { repo: 'anima-research/rayforce', commentId: own.id, previousBody: 'first draft', review: false, thread: { number: 7, kind: 'issue' } },
+    { repo: 'anima-research/example-repo', commentId: own.id, previousBody: 'first draft', review: false, thread: { number: 7, kind: 'issue' } },
   ]);
 });
 
@@ -212,7 +211,7 @@ test('edit_own_comment refuses a comment the bot did not write', async () => {
 
   const result = await call(f, TOOL_EDIT_OWN_COMMENT, { thread: 7, commentId: foreign.id, body: 'hijacked' });
   assert.equal(result.isError, true);
-  assert.match(text(result), /written by human-one, not rayforce-clone\[bot\]/);
+  assert.match(text(result), /written by human-one, not example-agent\[bot\]/);
   assert.deepEqual(await bodies(f.api, ISSUE), ['a human wrote this']);
   assert.equal(f.api.callsTo('updateComment').length, 0);
   assert.deepEqual(f.state.snapshot().edited, {});
@@ -243,7 +242,7 @@ test('edit_own_comment reports a comment that is not on the thread', async () =>
   f.state.createCheckpoint();
   const result = await call(f, TOOL_EDIT_OWN_COMMENT, { thread: 7, commentId: 999, body: 'x' });
   assert.equal(result.isError, true);
-  assert.match(text(result), /no comment 999 on anima-research\/rayforce#7/);
+  assert.match(text(result), /no comment 999 on anima-research\/example-repo#7/);
 });
 
 test('delete_own_comment deletes the bot\'s comment and books an undeletable record', async () => {
@@ -266,7 +265,7 @@ test('delete_own_comment deletes the bot\'s comment and books an undeletable rec
   assert.notEqual(result.isError, true);
   assert.deepEqual(await bodies(f.api, ISSUE), ['a human wrote this']);
   assert.deepEqual(f.state.snapshot().deleted[current as string], [
-    { repo: 'anima-research/rayforce', commentId: own.id, previousBody: 'never mind', review: false, thread: { number: 7, kind: 'issue' } },
+    { repo: 'anima-research/example-repo', commentId: own.id, previousBody: 'never mind', review: false, thread: { number: 7, kind: 'issue' } },
   ]);
 });
 
@@ -380,7 +379,7 @@ test('rollback across a comment someone else removed reports what it could not u
     [['delete', gone.id]],
   );
   assert.match(result.notUndone[0].reason ?? '', /no such comment/);
-  assert.match(result.reason ?? '', /undid 1 of 2 actions; could not undo anima-research\/rayforce comment/);
+  assert.match(result.reason ?? '', /undid 1 of 2 actions; could not undo anima-research\/example-repo comment/);
   assert.deepEqual(await bodies(f.api, ISSUE), []);
   assert.equal(f.logs.length, 1, 'the receipt also goes to stderr');
 });
@@ -519,7 +518,7 @@ test('rollback refuses to touch a repository outside the allow-list, and keeps t
   const f = fixture();
   f.api.seedIssue({ number: 7 });
   const base = f.state.createCheckpoint();
-  await call(f, TOOL_COMMENT, { thread: 7, body: 'written while rayforce was allowed' });
+  await call(f, TOOL_COMMENT, { thread: 7, body: 'written while example-repo was allowed' });
   const created = (await f.api.listComments(ISSUE))[0];
   f.api.clearCalls();
 
@@ -533,9 +532,9 @@ test('rollback refuses to touch a repository outside the allow-list, and keeps t
     refused.notUndone.map((i) => [i.action, i.commentId]),
     [['delete', created.id]],
   );
-  assert.match(refused.notUndone[0].reason ?? '', /anima-research\/rayforce is not in GITHUB_REPOS/);
+  assert.match(refused.notUndone[0].reason ?? '', /anima-research\/example-repo is not in GITHUB_REPOS/);
   assert.deepEqual(f.api.callLog(), [], 'no api call is made for a refused repository');
-  assert.deepEqual(await bodies(f.api, ISSUE), ['written while rayforce was allowed']);
+  assert.deepEqual(await bodies(f.api, ISSUE), ['written while example-repo was allowed']);
 
   // The record survived the refusal, so a correctly configured retry still
   // undoes it: a refusal is not a silent discard.
@@ -865,7 +864,7 @@ test('edit_own_comment refuses a colliding id until the caller names the endpoin
   ]);
   assert.deepEqual(reviewCase.f.state.snapshot().edited[reviewCp.id], [
     {
-      repo: 'anima-research/rayforce',
+      repo: 'anima-research/example-repo',
       commentId: reviewCase.shared,
       previousBody: 'review comment',
       review: true,
@@ -917,7 +916,7 @@ test('delete_own_comment refuses a colliding id until the caller names the endpo
   assert.deepEqual(reviewCase.f.api.callsTo('deleteComment')[0].args, [TEST_REPO, reviewCase.shared, true]);
   assert.deepEqual(reviewCase.f.state.snapshot().deleted[reviewCp.id], [
     {
-      repo: 'anima-research/rayforce',
+      repo: 'anima-research/example-repo',
       commentId: reviewCase.shared,
       previousBody: 'review comment',
       review: true,
