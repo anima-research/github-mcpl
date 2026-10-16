@@ -1,5 +1,5 @@
 /**
- * Webhook listener (TASK-SRHKG.1.3): the order of the checks is the test.
+ * Webhook listener: the order of the checks is the test.
  *
  * Every case below goes through a real `node:http` server on a loopback port
  * and a real `fetch`, because the properties under test — "rejected before
@@ -336,7 +336,7 @@ test('a check_suite delivery reaches the listener with the failed job names', as
     sha: HEAD,
     conclusion: 'failure',
     total: 2,
-    failed: [{ name: 'clippy', url: 'https://github.com/anima-research/rayforce/runs/2700001235' }],
+    failed: [{ name: 'clippy', url: 'https://github.com/anima-research/example-repo/runs/2700001235' }],
   });
   const r = await rig(t, { api });
   await r.deliver('check_suite', fixture('check_suite.completed.json'), 'suite-1');
@@ -345,7 +345,7 @@ test('a check_suite delivery reaches the listener with the failed job names', as
   assert.equal(r.events[0].kind, 'checks.completed');
   assert.equal(r.events[0].sha, HEAD);
   assert.deepEqual(r.events[0].checks?.failed, [
-    { name: 'clippy', url: 'https://github.com/anima-research/rayforce/runs/2700001235' },
+    { name: 'clippy', url: 'https://github.com/anima-research/example-repo/runs/2700001235' },
   ]);
 });
 
@@ -400,7 +400,7 @@ function config(overrides: Partial<Config> = {}): Config {
     repos: [TEST_REPO],
     prBaseAllow: ['dev'],
     stateFile: null,
-    botLogin: 'rayforce-clone[bot]',
+    botLogin: 'example-agent[bot]',
     maintainers: [],
     ...overrides,
   };
@@ -443,7 +443,7 @@ test('a check_run and a check_suite delivery for one sha produce one checks even
     sha: HEAD,
     conclusion: 'failure',
     total: 2,
-    failed: [{ name: 'test (ubuntu-latest)', url: 'https://github.com/anima-research/rayforce/runs/2700001234' }],
+    failed: [{ name: 'test (ubuntu-latest)', url: 'https://github.com/anima-research/example-repo/runs/2700001234' }],
   });
   const r = await rig(t, { api });
   await r.deliver('check_suite', fixture('check_suite.completed.json'), 'suite-c');
@@ -514,8 +514,8 @@ test('two failing suites finishing separately deliver one event naming every fai
   // The regression the reviewer reproduced: the first suite's delivery found
   // the sha still pending with [lint], emitted it, and the sha gate then
   // suppressed the final [lint, test] because it ranked the same.
-  const LINT = { name: 'lint', url: 'https://github.com/anima-research/rayforce/runs/1' };
-  const TEST_JOB = { name: 'test', url: 'https://github.com/anima-research/rayforce/runs/2' };
+  const LINT = { name: 'lint', url: 'https://github.com/anima-research/example-repo/runs/1' };
+  const TEST_JOB = { name: 'test', url: 'https://github.com/anima-research/example-repo/runs/2' };
   const r = await rig(t, {
     getCheckRuns: async (_repo, sha, call) =>
       call === 1
@@ -543,8 +543,8 @@ test('two failing suites finishing separately deliver one event naming every fai
 test('a settled sha that later reports more failed jobs supersedes, once', async (t) => {
   // The other order: the first lookup already looks settled because the
   // second suite has not been created yet.
-  const LINT = { name: 'lint', url: 'https://github.com/anima-research/rayforce/runs/1' };
-  const TEST_JOB = { name: 'test', url: 'https://github.com/anima-research/rayforce/runs/2' };
+  const LINT = { name: 'lint', url: 'https://github.com/anima-research/example-repo/runs/1' };
+  const TEST_JOB = { name: 'test', url: 'https://github.com/anima-research/example-repo/runs/2' };
   const r = await rig(t, {
     getCheckRuns: async (_repo, sha, call) =>
       call === 1
@@ -623,7 +623,7 @@ function suiteFor(sha: string): string {
   return JSON.stringify(suite);
 }
 
-const CLIPPY = { name: 'clippy', url: 'https://github.com/anima-research/rayforce/runs/2700001235' };
+const CLIPPY = { name: 'clippy', url: 'https://github.com/anima-research/example-repo/runs/2700001235' };
 
 test('an overlapping poll and webhook for one head sha deliver it exactly once', async (t) => {
   // The round-2 regression: the poller decided to emit, awaited its listener,

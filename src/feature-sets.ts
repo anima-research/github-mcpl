@@ -1,5 +1,5 @@
 /**
- * Feature-set declarations — MCPL 0.5 (SPEC §5.1, §6.1, §6.2), TASK-SRHKG.1.6.
+ * Feature-set declarations — MCPL 0.5 (SPEC §5.1, §6.1, §6.2).
  *
  * Six feature sets, exactly as the contract's "Feature sets and tools" section
  * names them:

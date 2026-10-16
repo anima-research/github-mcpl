@@ -1,5 +1,5 @@
 /**
- * Rendering (TASK-SRHKG.1.4; contract section "Tags and metadata" and "Tool
+ * Rendering (contract section "Tags and metadata" and "Tool
  * results are text blocks rendered by content.ts, bounded").
  *
  * Pure functions: data in, `ContentBlock[]` out. Everything the model reads

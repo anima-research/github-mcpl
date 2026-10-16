@@ -11,7 +11,7 @@ capability grant's decision; a tag only influences treatment afterwards.
 
 ## 1. GitHub event → `NormalizedEvent.kind`
 
-| GitHub webhook event (`action`) | Polled source (amendment 1) | `kind` | Thread |
+| GitHub webhook event (`action`) | Polled source | `kind` | Thread |
 |---|---|---|---|
 | `issues` (`opened`) | `listIssuesSince` | `issue.opened` | issue |
 | `issues` (`edited`) | `listIssuesSince` | `issue.edited` | issue |

@@ -1,6 +1,6 @@
 /**
  * Tool support — the arguments, refusals, failures and per-field bounds every
- * ToolModule shares (TASK-SRHKG.1.9, moved out of tools-read.ts).
+ * ToolModule shares (moved out of tools-read.ts).
  *
  * .6 put these in `tools-read.ts` because its write scope was those four files
  * and both write modules needed them; .7 then grew its own thread parser in

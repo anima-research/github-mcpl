@@ -1,5 +1,5 @@
 /**
- * The wired server (TASK-SRHKG.1.9): the seven packages as one connection.
+ * The wired server: every module as one connection.
  *
  * Every case here goes through the real `GitHubMcplServer` over a real
  * `McplConnection` pair (the {@link harness}), the real `WebhookListener` over
@@ -345,7 +345,7 @@ test('an issue webhook delivery arrives as push/event and channels/incoming with
   const origin = push.origin as Record<string, unknown>;
   assert.equal(origin.source, 'github');
   assert.equal(origin.kind, 'issue.opened');
-  assert.equal(origin.repo, 'anima-research/rayforce');
+  assert.equal(origin.repo, 'anima-research/example-repo');
   assert.equal(origin.channelId, channelId(ISSUE));
   assert.deepEqual(origin.sender, { login: 'octocat', isBot: false });
   // The wake metadata rides on `origin`, where a host's matchers read it.
@@ -377,8 +377,8 @@ test('a CI failure carries the failed jobs and their urls, and the bot’s own s
     conclusion: 'failure',
     total: 3,
     failed: [
-      { name: 'test (ubuntu-latest)', url: 'https://github.com/anima-research/rayforce/runs/2700001234' },
-      { name: 'clippy', url: 'https://github.com/anima-research/rayforce/runs/2700001235' },
+      { name: 'test (ubuntu-latest)', url: 'https://github.com/anima-research/example-repo/runs/2700001234' },
+      { name: 'clippy', url: 'https://github.com/anima-research/example-repo/runs/2700001235' },
     ],
   });
   const h = rig(t, { api });
@@ -402,8 +402,8 @@ test('a CI failure carries the failed jobs and their urls, and the bot’s own s
   // Every failed job, by name and by url, is in the rendered body.
   const text = textOf(push.payload as { content: [] });
   assert.match(text, /checks: failure, 2 failed/);
-  assert.match(text, /test \(ubuntu-latest\) — https:\/\/github\.com\/anima-research\/rayforce\/runs\/2700001234/);
-  assert.match(text, /clippy — https:\/\/github\.com\/anima-research\/rayforce\/runs\/2700001235/);
+  assert.match(text, /test \(ubuntu-latest\) — https:\/\/github\.com\/anima-research\/example-repo\/runs\/2700001234/);
+  assert.match(text, /clippy — https:\/\/github\.com\/anima-research\/example-repo\/runs\/2700001235/);
   // And it is a channel delivery too, because a check suite has a pull request.
   assert.equal(incoming(h)[0].channelId, channelId(PULL));
 });
@@ -1902,7 +1902,7 @@ test('finding 1: a channel registered before the allow-list narrowed cannot be w
     }),
   );
   assert.equal(refused.code, -32602);
-  assert.match(refused.message, /channels\/publish: repository anima-research\/rayforce is not in GITHUB_REPOS/);
+  assert.match(refused.message, /channels\/publish: repository anima-research\/example-repo is not in GITHUB_REPOS/);
   assert.deepEqual(api.callsTo('createComment'), [], 'the refusal came before the GitHub call');
 });
 

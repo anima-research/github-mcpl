@@ -9,8 +9,8 @@
     "conclusion": "failure",
     "started_at": "2026-10-13T10:11:30Z",
     "completed_at": "2026-10-13T10:19:40Z",
-    "html_url": "https://github.com/anima-research/rayforce/runs/2700001234",
-    "details_url": "https://github.com/anima-research/rayforce/actions/runs/88001",
+    "html_url": "https://github.com/anima-research/example-repo/runs/2700001234",
+    "details_url": "https://github.com/anima-research/example-repo/actions/runs/88001",
     "output": { "title": "3 failed", "summary": "scheduler::tick::drains_once", "annotations_count": 3 },
     "check_suite": { "id": 2600000900, "head_branch": "fix-final-batch", "head_sha": "4d7b2e8c1a93f05627de4b1c8a0f3927e5c6d418" },
     "pull_requests": [
@@ -23,7 +23,7 @@
     ],
     "app": { "id": 15368, "slug": "github-actions", "name": "GitHub Actions" }
   },
-  "repository": { "id": 100200300, "name": "rayforce", "full_name": "anima-research/rayforce", "private": true, "owner": { "login": "anima-research", "id": 4001, "type": "Organization" }, "html_url": "https://github.com/anima-research/rayforce", "default_branch": "dev" },
-  "sender": { "login": "rayforce-clone[bot]", "id": 9001, "type": "Bot" },
+  "repository": { "id": 100200300, "name": "example-repo", "full_name": "anima-research/example-repo", "private": true, "owner": { "login": "anima-research", "id": 4001, "type": "Organization" }, "html_url": "https://github.com/anima-research/example-repo", "default_branch": "dev" },
+  "sender": { "login": "example-agent[bot]", "id": 9001, "type": "Bot" },
   "installation": { "id": 70000001 }
 }

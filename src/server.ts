@@ -1,5 +1,5 @@
 /**
- * GitHubMcplServer — the one server the seven packages make (TASK-SRHKG.1.9).
+ * GitHubMcplServer — the one server every module plugs into.
  *
  * What it joins up, in the order a connection meets it:
  *
@@ -1806,7 +1806,7 @@ export class GitHubMcplServer {
  *
  * GitHub gives an issue comment no reply relation whatsoever — there is no
  * `in_reply_to_id` on the issues endpoint — so before this amendment every
- * answer to the bot on an issue read as plain `chat:ambient`, which the WP10
+ * answer to the bot on an issue read as plain `chat:ambient`, which the first
  * end-to-end run showed costs the bot every follow-up on its own comment.
  *
  * The rule that stands in for it is **turn order**: the last comment on the

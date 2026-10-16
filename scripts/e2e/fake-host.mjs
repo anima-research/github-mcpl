@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * A scripted MCPL host for the WP10 end-to-end run (TASK-SRHKG.1.10).
+ * A scripted MCPL host for end-to-end runs against a live App.
  *
  * It is the host side of `test/harness.ts`, moved off an in-memory stream pair
  * and onto a child process's stdio: it spawns the built server

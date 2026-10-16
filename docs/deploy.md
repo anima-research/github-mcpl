@@ -245,9 +245,9 @@ contain and nothing else:
 | a check conclusion on an open pull request's head | `push` with no thread attached, and the distinction between `synchronize` and any other PR update |
 
 The two in the second column that matter are the review ones: a repository
-whose reviews are the work — rayforce, where the maintainer reviews inline
-and requests reviews by hand — needs the webhook. **If the clone must wake on
-a submitted review or a review request, polling-only is not enough.**
+whose reviews are the work, where maintainers review inline and request
+reviews by hand, needs the webhook. **If the agent must wake on a submitted
+review or a review request, polling-only is not enough.**
 Everything else degrades gracefully: the thread update that carries the
 review still arrives, just later, without the review's own event or tags.
 
@@ -270,12 +270,11 @@ your secret. Do not leave a production installation pointed at smee.
 
 ## E2E against a sandbox
 
-Do not rehearse against the real repository. The sandbox for this work is the
-private repository `theaspirational/github-mcpl-sandbox`: default branch
-`dev`, and a CI workflow that fails whenever a `.fail` file exists in the
-tree, which is how a `github:ci=failure` event is produced on demand. Install
-the App on that repository alone, set `GITHUB_REPOS` to it, and walk the list
-in TASK-SRHKG.1 (an issue arrives as a push event and a `channels/incoming`
+Do not rehearse against the real repository. Use a private sandbox with a
+default branch of your choice and a CI workflow that fails whenever a `.fail`
+file exists in the tree, which is how a `github:ci=failure` event is produced
+on demand. Install the App on that repository alone, set `GITHUB_REPOS` to
+it, and walk the list (an issue arrives as a push event and a `channels/incoming`
 with the documented tags; a publish lands as a comment; a review-thread reply
 lands in its thread; `create_review` posts two inline comments;
 `upsert_sticky_comment` edits in place on the second call; a rollback deletes

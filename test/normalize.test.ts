@@ -1,5 +1,5 @@
 /**
- * Fixture → NormalizedEvent (TASK-SRHKG.1.3).
+ * Fixture → NormalizedEvent.
  *
  * Every file in test/fixtures/ is a hand-written payload shaped like GitHub's
  * documented webhook JSON — `octocat`/`hubot` placeholders, invented ids, no
@@ -84,7 +84,7 @@ const EXPECTED: Record<string, Expectation> = {
         thread: ISSUE_41,
         actor: { login: 'octocat', isBot: false },
         title: 'Scheduler drops the last batch when the queue drains mid-tick',
-        html_url: 'https://github.com/anima-research/rayforce/issues/41',
+        html_url: 'https://github.com/anima-research/example-repo/issues/41',
       },
     ],
   },
@@ -94,7 +94,7 @@ const EXPECTED: Record<string, Expectation> = {
         kind: 'issue.closed',
         thread: ISSUE_41,
         actor: { login: 'hubot', isBot: false },
-        html_url: 'https://github.com/anima-research/rayforce/issues/41',
+        html_url: 'https://github.com/anima-research/example-repo/issues/41',
       },
     ],
   },
@@ -104,8 +104,8 @@ const EXPECTED: Record<string, Expectation> = {
         kind: 'comment.created',
         thread: ISSUE_41,
         actor: { login: 'hubot', isBot: false },
-        body: '@rayforce-clone[bot] can you reproduce this on dev?',
-        html_url: 'https://github.com/anima-research/rayforce/issues/41#issuecomment-2200000007',
+        body: '@example-agent[bot] can you reproduce this on dev?',
+        html_url: 'https://github.com/anima-research/example-repo/issues/41#issuecomment-2200000007',
         // Amendment 2b: a top-level comment carries its own id, so the
         // turn-order rule can place it in the thread.
         comment: { id: 2200000007 },
@@ -119,7 +119,7 @@ const EXPECTED: Record<string, Expectation> = {
         // `issue.pull_request` present ⇒ the thread is a pull request.
         thread: PULL_58,
         actor: { login: 'octocat', isBot: false },
-        html_url: 'https://github.com/anima-research/rayforce/pull/58#issuecomment-2200000031',
+        html_url: 'https://github.com/anima-research/example-repo/pull/58#issuecomment-2200000031',
         comment: { id: 2200000031 },
       },
     ],
@@ -129,15 +129,15 @@ const EXPECTED: Record<string, Expectation> = {
       {
         kind: 'pull.opened',
         thread: PULL_58,
-        actor: { login: 'rayforce-clone[bot]', isBot: true },
+        actor: { login: 'example-agent[bot]', isBot: true },
         title: 'fix(scheduler): dispatch the final batch',
         sha: FIRST_HEAD,
-        html_url: 'https://github.com/anima-research/rayforce/pull/58',
+        html_url: 'https://github.com/anima-research/example-repo/pull/58',
       },
     ],
   },
   'pull_request.synchronize.json': {
-    events: [{ kind: 'pull.synchronize', thread: PULL_58, actor: { login: 'rayforce-clone[bot]', isBot: true }, sha: HEAD }],
+    events: [{ kind: 'pull.synchronize', thread: PULL_58, actor: { login: 'example-agent[bot]', isBot: true }, sha: HEAD }],
   },
   'pull_request.ready_for_review.json': {
     events: [{ kind: 'pull.ready_for_review', thread: PULL_58, sha: FIRST_HEAD }],
@@ -157,7 +157,7 @@ const EXPECTED: Record<string, Expectation> = {
         body: 'Two things before this goes in.',
         sha: HEAD,
         review: { id: 2400000012, state: 'changes_requested' },
-        html_url: 'https://github.com/anima-research/rayforce/pull/58#pullrequestreview-2400000012',
+        html_url: 'https://github.com/anima-research/example-repo/pull/58#pullrequestreview-2400000012',
       },
     ],
   },
@@ -196,7 +196,7 @@ const EXPECTED: Record<string, Expectation> = {
       {
         kind: 'review_comment.created',
         thread: PULL_58,
-        actor: { login: 'rayforce-clone[bot]', isBot: true },
+        actor: { login: 'example-agent[bot]', isBot: true },
         sha: HEAD,
         reviewComment: {
           id: 2500000078,
@@ -216,7 +216,7 @@ const EXPECTED: Record<string, Expectation> = {
         kind: 'checks.completed',
         // The suite's head sha is the head of PR 58, so the event is threaded.
         thread: PULL_58,
-        actor: { login: 'rayforce-clone[bot]', isBot: true },
+        actor: { login: 'example-agent[bot]', isBot: true },
         sha: HEAD,
         checks: { conclusion: 'failure', failed: [] },
       },
@@ -254,7 +254,7 @@ const EXPECTED: Record<string, Expectation> = {
         actor: { login: 'octocat', isBot: false },
         sha: DEV_SHA,
         checks: { conclusion: 'success', failed: [] },
-        html_url: `https://github.com/anima-research/rayforce/commit/${DEV_SHA}`,
+        html_url: `https://github.com/anima-research/example-repo/commit/${DEV_SHA}`,
       },
     ],
   },
@@ -268,9 +268,9 @@ const EXPECTED: Record<string, Expectation> = {
         // with every failure on the sha.
         checks: {
           conclusion: 'failure',
-          failed: [{ name: 'test (ubuntu-latest)', url: 'https://github.com/anima-research/rayforce/runs/2700001234' }],
+          failed: [{ name: 'test (ubuntu-latest)', url: 'https://github.com/anima-research/example-repo/runs/2700001234' }],
         },
-        html_url: 'https://github.com/anima-research/rayforce/runs/2700001234',
+        html_url: 'https://github.com/anima-research/example-repo/runs/2700001234',
       },
     ],
   },
@@ -279,9 +279,9 @@ const EXPECTED: Record<string, Expectation> = {
       {
         kind: 'push',
         thread: undefined,
-        actor: { login: 'rayforce-clone[bot]', isBot: true },
+        actor: { login: 'example-agent[bot]', isBot: true },
         sha: HEAD,
-        html_url: 'https://github.com/anima-research/rayforce/compare/1f0c9a4d2b7e...4d7b2e8c1a93',
+        html_url: 'https://github.com/anima-research/example-repo/compare/1f0c9a4d2b7e...4d7b2e8c1a93',
       },
     ],
   },
@@ -373,7 +373,7 @@ test('actor and repo extraction', () => {
   assert.deepEqual(actorFrom({ login: 'dependabot[bot]' }), { login: 'dependabot[bot]', isBot: true });
   assert.deepEqual(actorFrom({ login: 'some-app', type: 'Bot' }), { login: 'some-app', isBot: true });
   assert.equal(actorFrom({}), undefined);
-  assert.deepEqual(repoFrom({ repository: { full_name: 'anima-research/rayforce' } }), TEST_REPO);
+  assert.deepEqual(repoFrom({ repository: { full_name: 'anima-research/example-repo' } }), TEST_REPO);
   // No full_name: owner.login + name is the fallback.
   assert.deepEqual(repoFrom({ repository: { owner: { login: 'a' }, name: 'b' } }), { owner: 'a', name: 'b' });
   assert.equal(repoFrom({ repository: { full_name: 'not-a-slug' } }), undefined);
@@ -399,7 +399,7 @@ const POLLED_ISSUE: PolledIssue = {
   author: { login: 'octocat', isBot: false },
   createdAt: '2026-10-12T08:00:00Z',
   updatedAt: '2026-10-13T09:00:00Z',
-  html_url: 'https://github.com/anima-research/rayforce/issues/41',
+  html_url: 'https://github.com/anima-research/example-repo/issues/41',
 };
 
 /** The cursor the poll pass queried with, after POLLED_ISSUE was created. */
@@ -513,7 +513,7 @@ test('a polled top-level comment carries its own id, a review comment does not (
     author: { login: 'octocat', isBot: false },
     body: 'a followup',
     updatedAt: '2026-10-13T09:00:00Z',
-    html_url: 'https://github.com/anima-research/rayforce/issues/41#issuecomment-2200000031',
+    html_url: 'https://github.com/anima-research/example-repo/issues/41#issuecomment-2200000031',
   };
   // Amendment 2b places a comment in its thread's turn order, which needs its
   // id; a `since` row has always carried one, it was just thrown away.
@@ -534,7 +534,7 @@ test('a polled issue comment takes its thread kind from the html_url', () => {
     author: { login: 'octocat', isBot: false },
     body: 'Looks right.',
     updatedAt: '2026-10-13T09:05:00Z',
-    html_url: 'https://github.com/anima-research/rayforce/pull/58#issuecomment-2200000031',
+    html_url: 'https://github.com/anima-research/example-repo/pull/58#issuecomment-2200000031',
   };
   const event = normalizePolledComment(TEST_REPO, row, 'issue_comment', RECEIVED_AT);
   assert.equal(event.kind, 'comment.created');
@@ -544,7 +544,7 @@ test('a polled issue comment takes its thread kind from the html_url', () => {
 
   const onIssue = normalizePolledComment(
     TEST_REPO,
-    { ...row, number: 41, html_url: 'https://github.com/anima-research/rayforce/issues/41#issuecomment-1' },
+    { ...row, number: 41, html_url: 'https://github.com/anima-research/example-repo/issues/41#issuecomment-1' },
     'issue_comment',
     RECEIVED_AT,
   );
@@ -555,10 +555,10 @@ test('a polled review comment carries path and inReplyTo and is always on a pull
   const row: PolledComment = {
     id: 2500000078,
     number: 58,
-    author: { login: 'rayforce-clone[bot]', isBot: true },
+    author: { login: 'example-agent[bot]', isBot: true },
     body: 'Guarded now.',
     updatedAt: '2026-10-13T13:02:00Z',
-    html_url: 'https://github.com/anima-research/rayforce/pull/58#discussion_r2500000078',
+    html_url: 'https://github.com/anima-research/example-repo/pull/58#discussion_r2500000078',
     path: 'src/scheduler/tick.rs',
     inReplyTo: 2500000077,
   };
@@ -580,7 +580,7 @@ test('a polled check summary is keyed on the conclusion, not on a timestamp', ()
     sha: HEAD,
     conclusion: 'failure' as CheckConclusion,
     total: 3,
-    failed: [{ name: 'clippy', url: 'https://github.com/anima-research/rayforce/runs/2700001235' }],
+    failed: [{ name: 'clippy', url: 'https://github.com/anima-research/example-repo/runs/2700001235' }],
   };
   const event = normalizePolledChecks(TEST_REPO, PULL_58, summary, PULL_58.repo.name, RECEIVED_AT);
   assert.equal(event.kind, 'checks.completed');
@@ -900,7 +900,7 @@ test('resolveCheckEvents holds back a head whose other suite is still running', 
     sha: HEAD,
     conclusion: null,
     total: 4,
-    failed: [{ name: 'lint', url: 'https://github.com/anima-research/rayforce/runs/1' }],
+    failed: [{ name: 'lint', url: 'https://github.com/anima-research/example-repo/runs/1' }],
   });
   assert.deepEqual(await resolveCheckEvents(normalizeWebhook(load('check_suite.completed.json')), api), []);
 });
@@ -912,8 +912,8 @@ test('resolveCheckEvents emits the settled sha with every failed job on it', asy
     conclusion: 'failure',
     total: 4,
     failed: [
-      { name: 'lint', url: 'https://github.com/anima-research/rayforce/runs/1' },
-      { name: 'test', url: 'https://github.com/anima-research/rayforce/runs/2' },
+      { name: 'lint', url: 'https://github.com/anima-research/example-repo/runs/1' },
+      { name: 'test', url: 'https://github.com/anima-research/example-repo/runs/2' },
     ],
   });
   const [event] = await resolveCheckEvents(normalizeWebhook(load('check_suite.completed.json')), api);

@@ -1,5 +1,5 @@
 /**
- * Ingress normalization (TASK-SRHKG.1.3, §Ingress).
+ * Ingress normalization (§Ingress).
  *
  * One place turns a GitHub delivery into a {@link NormalizedEvent}: a raw
  * webhook payload (webhook.ts) or a polled row (poller.ts). Everything here

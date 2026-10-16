@@ -1,5 +1,5 @@
 /**
- * github.issues and github.pr (TASK-SRHKG.1.6).
+ * github.issues and github.pr.
  *
  * The two refusals the contract turns on are asserted twice over: a base
  * outside GITHUB_PR_BASE_ALLOW on creation and on a retarget, and a repository
@@ -83,7 +83,7 @@ test('create_issue opens an issue in the default repository', async () => {
   const out = ok(
     await issuesToolModule.call('create_issue', { title: 'Flake in CI', body: 'reproduces on dev' }, ctx(api)),
   );
-  assert.match(out, /issue anima-research\/rayforce#\d+ \[open\] Flake in CI/);
+  assert.match(out, /issue anima-research\/example-repo#\d+ \[open\] Flake in CI/);
   assert.match(out, /reproduces on dev/);
   assert.deepEqual(api.callsTo('createIssue')[0].args, [TEST_REPO, { title: 'Flake in CI', body: 'reproduces on dev' }]);
 });
@@ -118,7 +118,7 @@ test('close_issue closes with a reason', async () => {
   api.seedIssue({ number: 7 });
 
   const out = ok(await issuesToolModule.call('close_issue', { number: 7, reason: 'not_planned' }, ctx(api)));
-  assert.match(out, /issue anima-research\/rayforce#7 \[closed \(not_planned\)\]/);
+  assert.match(out, /issue anima-research\/example-repo#7 \[closed \(not_planned\)\]/);
   assert.deepEqual(api.callLog(), ['updateIssue']);
   assert.deepEqual(api.callsTo('updateIssue')[0].args, [ISSUE, { state: 'closed', stateReason: 'not_planned' }]);
 });
@@ -167,7 +167,7 @@ test('an issue write outside GITHUB_REPOS is refused by name, before any call', 
     await issuesToolModule.call('create_issue', { repo: 'someone-else/not-ours', title: 'hi' }, ctx(api)),
   );
   assert.match(out, /create_issue refused: repository someone-else\/not-ours is not in GITHUB_REPOS/);
-  assert.match(out, /allowed: anima-research\/rayforce/);
+  assert.match(out, /allowed: anima-research\/example-repo/);
   assert.equal(api.calls.length, 0);
 });
 
@@ -197,7 +197,7 @@ test('create_pull_request opens a pull request against an allowed base', async (
       ctx(api),
     ),
   );
-  assert.match(out, /pull anima-research\/rayforce#\d+ \[open, draft\] Fix the flake/);
+  assert.match(out, /pull anima-research\/example-repo#\d+ \[open, draft\] Fix the flake/);
   assert.deepEqual(api.callsTo('createPullRequest')[0].args, [
     TEST_REPO,
     { head: 'fix-flake', base: 'dev', title: 'Fix the flake', body: 'why', draft: true },
@@ -214,7 +214,7 @@ test('create_pull_request refuses a base outside GITHUB_PR_BASE_ALLOW', async ()
     ),
   );
   assert.match(out, /create_pull_request refused: base branch "main" is not in GITHUB_PR_BASE_ALLOW/);
-  assert.match(out, /allowed on anima-research\/rayforce: dev/);
+  assert.match(out, /allowed on anima-research\/example-repo: dev/);
   assert.equal(api.calls.length, 0, 'nothing reached the API');
 });
 
@@ -227,7 +227,7 @@ test('an empty GITHUB_PR_BASE_ALLOW means no pull request may be opened', async 
       ctx(api, { prBaseAllow: [] }),
     ),
   );
-  assert.match(out, /GITHUB_PR_BASE_ALLOW allows no branch on anima-research\/rayforce, so none may be targeted/);
+  assert.match(out, /GITHUB_PR_BASE_ALLOW allows no branch on anima-research\/example-repo, so none may be targeted/);
   assert.equal(api.calls.length, 0);
 });
 
@@ -287,7 +287,7 @@ test('request_review requests exactly the logins given', async () => {
   const out = ok(
     await prToolModule.call('request_review', { number: 8, logins: ['human-one', 'human-two'] }, ctx(api)),
   );
-  assert.equal(out, 'requested a review from human-one, human-two on anima-research/rayforce#8');
+  assert.equal(out, 'requested a review from human-one, human-two on anima-research/example-repo#8');
   assert.deepEqual(api.callsTo('requestReviewers')[0].args, [PULL, ['human-one', 'human-two']]);
 });
 
@@ -310,14 +310,14 @@ test('with several repositories, the base allow-list is read per repository', as
   const second = { owner: TEST_REPO.owner, name: 'chronicle' };
   const two = ctx(api, {
     repos: [TEST_REPO, second],
-    // rayforce merges into dev, everything else into main.
-    prBaseAllow: ['anima-research/rayforce:dev', 'main'],
+    // example-repo merges into dev, everything else into main.
+    prBaseAllow: ['anima-research/example-repo:dev', 'main'],
   });
   const create = (repo: string, base: string) =>
     prToolModule.call('create_pull_request', { repo, head: 'fix', base, title: 'Fix' }, two);
 
-  ok(await create('anima-research/rayforce', 'dev'));
-  ok(await create('anima-research/rayforce', 'main'));
+  ok(await create('anima-research/example-repo', 'dev'));
+  ok(await create('anima-research/example-repo', 'main'));
   ok(await create('anima-research/chronicle', 'main'));
   const refused = failure(await create('anima-research/chronicle', 'dev'));
   assert.match(refused, /base branch "dev" is not in GITHUB_PR_BASE_ALLOW \(allowed on anima-research\/chronicle: main\)/);

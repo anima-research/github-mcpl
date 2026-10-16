@@ -1,6 +1,5 @@
 /**
- * github.review — submitting a review and resolving review threads
- * (TASK-SRHKG.1.6).
+ * github.review — submitting a review and resolving review threads.
  *
  *   create_review     — COMMENT | APPROVE | REQUEST_CHANGES, with inline
  *                       comments on diff lines.
@@ -55,7 +54,7 @@ const DIFF_SIDES: readonly DiffSide[] = ['LEFT', 'RIGHT'];
 /** A verdict on code is only a verdict when someone else wrote it. */
 const VERDICT_EVENTS: readonly ReviewEvent[] = ['APPROVE', 'REQUEST_CHANGES'];
 
-/** GitHub logins are case-insensitive; `rayforce-clone[bot]` is one login. */
+/** GitHub logins are case-insensitive; `My-Agent[bot]` and `my-agent[bot]` are one login. */
 function sameLogin(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }

@@ -1,5 +1,5 @@
 /**
- * github.read, and the feature-set declarations (TASK-SRHKG.1.6).
+ * github.read, and the feature-set declarations.
  *
  * Everything runs against FakeGitHubApi: no network, no octokit, no process
  * ever leaves the test. The declarations are asserted here rather than in a
@@ -202,7 +202,7 @@ test('get_issue reads an issue and defaults the repository', async () => {
   api.seedIssue({ number: 7, title: 'Flaky test', body: 'it fails on CI', labels: ['bug'] });
 
   const out = ok(await readToolModule.call('get_issue', { number: 7 }, ctx(api)));
-  assert.match(out, /issue anima-research\/rayforce#7 \[open\] Flaky test/);
+  assert.match(out, /issue anima-research\/example-repo#7 \[open\] Flaky test/);
   assert.match(out, /labels: bug/);
   assert.match(out, /it fails on CI/);
   // No repo argument: the single allowed repository is what reached the API.
@@ -212,14 +212,14 @@ test('get_issue reads an issue and defaults the repository', async () => {
 test('with several repositories, a read has to name one', async () => {
   const api = new FakeGitHubApi();
   const second = { owner: TEST_REPO.owner, name: 'chronicle' };
-  api.seedIssue({ number: 7, title: 'In rayforce' });
+  api.seedIssue({ number: 7, title: 'In example-repo' });
   api.seedIssue({ repo: second, number: 7, title: 'In chronicle' });
   const two = ctx(api, { repos: [TEST_REPO, second] });
 
   assert.match(failure(await readToolModule.call('get_issue', { number: 7 }, two)), /"repo" is required: GITHUB_REPOS names several/);
   assert.match(failure(await readToolModule.call('get_issue', { thread: '#7' }, two)), /name the repository as owner\/name#7/);
   assert.match(ok(await readToolModule.call('get_issue', { repo: 'anima-research/chronicle', number: 7 }, two)), /In chronicle/);
-  assert.match(ok(await readToolModule.call('get_issue', { thread: 'anima-research/rayforce#7' }, two)), /In rayforce/);
+  assert.match(ok(await readToolModule.call('get_issue', { thread: 'anima-research/example-repo#7' }, two)), /In example-repo/);
 });
 
 test('get_pull_request reports refs, mergeability and checks', async () => {
@@ -234,7 +234,7 @@ test('get_pull_request reports refs, mergeability and checks', async () => {
   });
 
   const out = ok(await readToolModule.call('get_pull_request', { number: 8 }, ctx(api)));
-  assert.match(out, /pull anima-research\/rayforce#8 \[open\] Fix the flake/);
+  assert.match(out, /pull anima-research\/example-repo#8 \[open\] Fix the flake/);
   assert.match(out, /fix-flake \(a{40}\) → dev/);
   assert.match(out, /mergeable: true/);
   assert.match(out, /reviewers requested: human-two/);
@@ -249,7 +249,7 @@ test('list_comments passes since through and renders ids and authors', async () 
   api.seedComment(ISSUE, { id: 1002, body: 'second', updatedAt: '2026-10-05T00:00:00.000Z' });
 
   const all = ok(await readToolModule.call('list_comments', { number: 7 }, ctx(api)));
-  assert.match(all, /2 comments on anima-research\/rayforce#7/);
+  assert.match(all, /2 comments on anima-research\/example-repo#7/);
   assert.match(all, /id 1001 by human-one/);
 
   const since = ok(
@@ -281,7 +281,7 @@ test('list_review_threads renders path, line, side and resolution', async () => 
   api.seedReviewThread(PULL, { id: 'RT_2', path: 'src/old.rs', line: 3, side: 'LEFT', isResolved: true });
 
   const out = ok(await readToolModule.call('list_review_threads', { number: 8 }, ctx(api)));
-  assert.match(out, /2 review threads on anima-research\/rayforce#8/);
+  assert.match(out, /2 review threads on anima-research\/example-repo#8/);
   assert.match(out, /RT_1 src\/lib\.rs:42 RIGHT unresolved/);
   assert.match(out, /RT_2 src\/old\.rs:3 LEFT resolved/);
 });
@@ -295,7 +295,7 @@ test('list_pull_request_files renders names and stats only', async () => {
   ]);
 
   const out = ok(await readToolModule.call('list_pull_request_files', { number: 8 }, ctx(api)));
-  assert.match(out, /2 changed files on anima-research\/rayforce#8/);
+  assert.match(out, /2 changed files on anima-research\/example-repo#8/);
   assert.match(out, /modified src\/lib\.rs \+10 -2/);
   assert.match(out, /removed docs\/old\.md \+0 -40/);
 });
@@ -321,7 +321,7 @@ test('search_issues bounds the limit to the rendered list bound', async () => {
   api.seedPullRequest({ number: 8, title: 'fix flaky test' });
 
   const out = ok(await readToolModule.call('search_issues', { query: 'flaky' }, ctx(api)));
-  assert.match(out, /2 matches in anima-research\/rayforce for "flaky"/);
+  assert.match(out, /2 matches in anima-research\/example-repo for "flaky"/);
   assert.match(out, /issue #7 \[open\] flaky test/);
   assert.match(out, /pull #8 \[open\] fix flaky test/);
   assert.deepEqual(api.callsTo('searchIssues')[0].args, [TEST_REPO, 'flaky', LIMITS.listEntries]);
@@ -334,7 +334,7 @@ test('search_issues bounds the limit to the rendered list bound', async () => {
 test('search_issues says so when nothing matches', async () => {
   const api = new FakeGitHubApi();
   const out = ok(await readToolModule.call('search_issues', { query: 'nothing' }, ctx(api)));
-  assert.match(out, /no matches in anima-research\/rayforce for "nothing"/);
+  assert.match(out, /no matches in anima-research\/example-repo for "nothing"/);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -347,20 +347,20 @@ test('a repository outside GITHUB_REPOS is refused by name, before any call', as
 
   const out = failure(await readToolModule.call('get_issue', { repo: 'someone-else/not-ours', number: 7 }, ctx(api)));
   assert.match(out, /get_issue refused: repository someone-else\/not-ours is not in GITHUB_REPOS/);
-  assert.match(out, /allowed: anima-research\/rayforce/);
+  assert.match(out, /allowed: anima-research\/example-repo/);
   assert.equal(api.calls.length, 0);
 });
 
 test('the allowed repository may be named explicitly', async () => {
   const api = new FakeGitHubApi();
   api.seedIssue({ number: 7 });
-  ok(await readToolModule.call('get_issue', { repo: 'anima-research/rayforce', number: 7 }, ctx(api)));
+  ok(await readToolModule.call('get_issue', { repo: 'anima-research/example-repo', number: 7 }, ctx(api)));
   assert.deepEqual(api.callsTo('getIssue')[0].args, [ISSUE]);
 });
 
 test('a malformed repo argument is rejected as a bad argument, not as a refusal', async () => {
   const api = new FakeGitHubApi();
-  const out = failure(await readToolModule.call('get_issue', { repo: 'rayforce', number: 7 }, ctx(api)));
+  const out = failure(await readToolModule.call('get_issue', { repo: 'example-repo', number: 7 }, ctx(api)));
   assert.match(out, /get_issue: "repo" must be owner\/name/);
   assert.equal(api.calls.length, 0);
 });
@@ -511,7 +511,7 @@ test('labels are bounded in count and in length', async () => {
 test('an echoed search query is bounded', async () => {
   const api = new FakeGitHubApi();
   const out = ok(await readToolModule.call('search_issues', { query: 'q'.repeat(100_000) }, ctx(api)));
-  assert.match(out, /^no matches in anima-research\/rayforce for "q+… \[truncated \d+ chars\]"$/);
+  assert.match(out, /^no matches in anima-research\/example-repo for "q+… \[truncated \d+ chars\]"$/);
   assert.ok(out.length < 400, `the echo stayed bounded (${out.length} chars)`);
 });
 
@@ -530,7 +530,7 @@ test('a pull request bounds its reviewer list, its refs and its URL', async () =
     head: { ref: 'h'.repeat(5_000), sha: 's'.repeat(5_000) },
     base: { ref: 'dev', sha: 'b'.repeat(40) },
     author: { login: 'a'.repeat(5_000), isBot: false },
-    html_url: `https://github.com/anima-research/rayforce/pull/8?${'q'.repeat(50_000)}`,
+    html_url: `https://github.com/anima-research/example-repo/pull/8?${'q'.repeat(50_000)}`,
     requestedReviewers: Array.from({ length: LIMITS.listEntries + 3 }, (_, i) => `reviewer-${i}${'y'.repeat(500)}`),
   });
 

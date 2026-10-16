@@ -1,5 +1,5 @@
 /**
- * GitHubAdapter against a local fake GitHub (TASK-SRHKG.1.2).
+ * GitHubAdapter against a local fake GitHub.
  *
  * Nothing here leaves the process: the adapter is pointed at a `node:http`
  * server on 127.0.0.1 that answers the endpoints the contract names, and the
@@ -43,7 +43,7 @@ import {
 // Fixtures
 // ─────────────────────────────────────────────────────────────────────────────
 
-const REPO: RepoRef = { owner: 'anima-research', name: 'rayforce' };
+const REPO: RepoRef = { owner: 'anima-research', name: 'example-repo' };
 const ISSUE: ThreadRef = { repo: REPO, number: 7, kind: 'issue' };
 const PULL: ThreadRef = { repo: REPO, number: 12, kind: 'pull' };
 const HEAD_SHA = 'f00dcafe00000000000000000000000000000000';
@@ -68,8 +68,8 @@ function config(extra: Record<string, string | undefined> = {}): Config {
     GITHUB_APP_ID: APP_ID,
     GITHUB_APP_PRIVATE_KEY_FILE: KEY_FILE,
     GITHUB_APP_INSTALLATION_ID: String(INSTALLATION_ID),
-    GITHUB_REPOS: 'anima-research/rayforce',
-    GITHUB_BOT_LOGIN: 'rayforce-clone[bot]',
+    GITHUB_REPOS: 'anima-research/example-repo',
+    GITHUB_BOT_LOGIN: 'example-agent[bot]',
     GITHUB_PR_BASE_ALLOW: 'dev',
     ...extra,
   });
@@ -174,7 +174,7 @@ const ISSUE_PAYLOAD = {
   labels: [{ name: 'bug' }, 'chore'],
   created_at: '2026-10-01T00:00:00Z',
   updated_at: '2026-10-02T00:00:00Z',
-  html_url: 'https://github.com/anima-research/rayforce/issues/7',
+  html_url: 'https://github.com/anima-research/example-repo/issues/7',
 };
 
 const PULL_PAYLOAD = {
@@ -188,11 +188,11 @@ const PULL_PAYLOAD = {
   mergeable: true,
   head: { ref: 'fix/thing', sha: HEAD_SHA },
   base: { ref: 'dev', sha: 'babe0000' },
-  user: { login: 'rayforce-clone[bot]', type: 'Bot' },
+  user: { login: 'example-agent[bot]', type: 'Bot' },
   requested_reviewers: [{ login: 'maintainer', type: 'User' }],
   created_at: '2026-10-01T00:00:00Z',
   updated_at: '2026-10-02T00:00:00Z',
-  html_url: 'https://github.com/anima-research/rayforce/pull/12',
+  html_url: 'https://github.com/anima-research/example-repo/pull/12',
 };
 
 const COMMENT_PAYLOAD = {
@@ -201,19 +201,19 @@ const COMMENT_PAYLOAD = {
   body: 'hello',
   created_at: '2026-10-01T00:00:00Z',
   updated_at: '2026-10-01T00:00:00Z',
-  html_url: 'https://github.com/anima-research/rayforce/issues/7#issuecomment-555',
+  html_url: 'https://github.com/anima-research/example-repo/issues/7#issuecomment-555',
 };
 
 /** A fake with every endpoint the contract's methods touch already answered. */
 function defaultRoutes(fake: FakeGitHub, tokenExpiresInMs = 3_600_000, token = TOKEN): FakeGitHub {
-  const r = '/repos/anima-research/rayforce';
+  const r = '/repos/anima-research/example-repo';
   return fake
     .on(`POST /app/installations/${INSTALLATION_ID}/access_tokens`, () => ({
       status: 201,
       body: { token, expires_at: new Date(Date.now() + tokenExpiresInMs).toISOString() },
     }))
     .on(`GET ${r}/installation`, { body: { id: INSTALLATION_ID } })
-    .on('GET /app', { body: { id: 777, slug: 'rayforce-clone', name: 'Rayforce Clone' } })
+    .on('GET /app', { body: { id: 777, slug: 'example-agent', name: 'Example Agent' } })
     .on(`GET ${r}/issues/7`, { body: ISSUE_PAYLOAD })
     .on(`POST ${r}/issues`, { status: 201, body: ISSUE_PAYLOAD })
     .on(`PATCH ${r}/issues/7`, { body: { ...ISSUE_PAYLOAD, state: 'closed', state_reason: 'not_planned' } })
@@ -359,7 +359,7 @@ test('mints an App JWT the private key verifies, and swaps it for an installatio
     'the JWT signature does not verify against the App key',
   );
 
-  assert.equal(r.fake.for('GET /repos/anima-research/rayforce/issues/7')[0].headers.authorization, `token ${TOKEN}`);
+  assert.equal(r.fake.for('GET /repos/anima-research/example-repo/issues/7')[0].headers.authorization, `token ${TOKEN}`);
   assertNoTokenLeak(r);
 });
 
@@ -393,32 +393,32 @@ test('discovers the installation from GITHUB_REPOS when GITHUB_APP_INSTALLATION_
   const r = await rig({ env: { GITHUB_APP_INSTALLATION_ID: undefined } });
   await r.adapter.getIssue(ISSUE);
 
-  const discovery = r.fake.for('GET /repos/anima-research/rayforce/installation');
+  const discovery = r.fake.for('GET /repos/anima-research/example-repo/installation');
   assert.equal(discovery.length, 1);
   assert.ok(discovery[0].headers.authorization.startsWith('Bearer '), 'discovery is JWT-authenticated');
   // Discovered once, then reused: the second call does not look it up again.
   await r.adapter.getIssue(ISSUE);
-  assert.equal(r.fake.for('GET /repos/anima-research/rayforce/installation').length, 1);
+  assert.equal(r.fake.for('GET /repos/anima-research/example-repo/installation').length, 1);
   assert.equal(r.fake.for(`POST /app/installations/${INSTALLATION_ID}/access_tokens`).length, 1);
   assertNoTokenLeak(r);
 });
 
 test('a 401 on a call re-mints the token once and retries', async () => {
   const r = await rig();
-  r.fake.on('GET /repos/anima-research/rayforce/issues/7', (_req, nth) =>
+  r.fake.on('GET /repos/anima-research/example-repo/issues/7', (_req, nth) =>
     nth === 0 ? { status: 401, body: { message: 'Bad credentials' } } : { body: ISSUE_PAYLOAD },
   );
 
   const issue = await r.adapter.getIssue(ISSUE);
   assert.equal(issue.number, 7);
-  assert.equal(r.fake.for('GET /repos/anima-research/rayforce/issues/7').length, 2);
+  assert.equal(r.fake.for('GET /repos/anima-research/example-repo/issues/7').length, 2);
   assert.equal(r.fake.for(`POST /app/installations/${INSTALLATION_ID}/access_tokens`).length, 2);
   assertNoTokenLeak(r);
 });
 
 test('a second 401 is not retried again; it surfaces as a 401 error', async () => {
   const r = await rig();
-  r.fake.on('GET /repos/anima-research/rayforce/issues/7', { status: 401, body: { message: 'Bad credentials' } });
+  r.fake.on('GET /repos/anima-research/example-repo/issues/7', { status: 401, body: { message: 'Bad credentials' } });
 
   const err = await r.adapter.getIssue(ISSUE).then(
     () => null,
@@ -427,7 +427,7 @@ test('a second 401 is not retried again; it surfaces as a 401 error', async () =
   assert.ok(err instanceof GitHubApiError);
   assert.equal(err.status, 401);
   assert.equal(err.githubMessage, 'Bad credentials');
-  assert.equal(r.fake.for('GET /repos/anima-research/rayforce/issues/7').length, 2);
+  assert.equal(r.fake.for('GET /repos/anima-research/example-repo/issues/7').length, 2);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -436,7 +436,7 @@ test('a second 401 is not retried again; it surfaces as a 401 error', async () =
 
 test('a 403 secondary rate limit is retried once, after the Retry-After it names', async () => {
   const r = await rig();
-  r.fake.on('POST /repos/anima-research/rayforce/issues/7/comments', (_req, nth) =>
+  r.fake.on('POST /repos/anima-research/example-repo/issues/7/comments', (_req, nth) =>
     nth === 0
       ? {
           status: 403,
@@ -449,14 +449,14 @@ test('a 403 secondary rate limit is retried once, after the Retry-After it names
   const comment = await r.adapter.createComment(ISSUE, 'hello');
   assert.equal(comment.id, 555);
   assert.deepEqual(r.sleeps, [3000]);
-  assert.equal(r.fake.for('POST /repos/anima-research/rayforce/issues/7/comments').length, 2);
+  assert.equal(r.fake.for('POST /repos/anima-research/example-repo/issues/7/comments').length, 2);
   assertNoTokenLeak(r);
 });
 
 test('the secondary-limit retry is spent once; a second 403 is the caller’s error', async () => {
   const r = await rig();
   const message = 'You have exceeded a secondary rate limit.';
-  r.fake.on('POST /repos/anima-research/rayforce/issues/7/comments', {
+  r.fake.on('POST /repos/anima-research/example-repo/issues/7/comments', {
     status: 403,
     headers: { 'retry-after': '1' },
     body: { message },
@@ -470,14 +470,14 @@ test('the secondary-limit retry is spent once; a second 403 is the caller’s er
   assert.equal(err.status, 403);
   assert.equal(err.githubMessage, message);
   assert.deepEqual(r.sleeps, [1000], 'exactly one bounded retry');
-  assert.equal(r.fake.for('POST /repos/anima-research/rayforce/issues/7/comments').length, 2);
+  assert.equal(r.fake.for('POST /repos/anima-research/example-repo/issues/7/comments').length, 2);
 });
 
 test('a 403 with no Retry-After but a spent budget waits for the reset, bounded', async () => {
   const now = Date.now();
   const r = await rig();
   r.setNow(now);
-  r.fake.on('GET /repos/anima-research/rayforce/issues/7', (_req, nth) =>
+  r.fake.on('GET /repos/anima-research/example-repo/issues/7', (_req, nth) =>
     nth === 0
       ? {
           status: 403,
@@ -499,7 +499,7 @@ test('a reset further out than the backoff bound is not slept on at all', async 
   const now = Date.now();
   const r = await rig();
   r.setNow(now);
-  r.fake.on('GET /repos/anima-research/rayforce/issues/7', {
+  r.fake.on('GET /repos/anima-research/example-repo/issues/7', {
     status: 403,
     headers: {
       'x-ratelimit-remaining': '0',
@@ -510,16 +510,16 @@ test('a reset further out than the backoff bound is not slept on at all', async 
 
   await assert.rejects(r.adapter.getIssue(ISSUE), (e: unknown) => e instanceof GitHubApiError && e.status === 403);
   assert.deepEqual(r.sleeps, [], 'an hour-long reset is reported, not slept through');
-  assert.equal(r.fake.for('GET /repos/anima-research/rayforce/issues/7').length, 1);
+  assert.equal(r.fake.for('GET /repos/anima-research/example-repo/issues/7').length, 1);
 });
 
 test('octokit’s own retry plugin is off, so a 5xx is one request and the caller’s error', async () => {
   const r = await rig();
-  r.fake.on('GET /repos/anima-research/rayforce/issues/7', { status: 500, body: { message: 'Server Error' } });
+  r.fake.on('GET /repos/anima-research/example-repo/issues/7', { status: 500, body: { message: 'Server Error' } });
 
   await assert.rejects(r.adapter.getIssue(ISSUE), (e: unknown) => e instanceof GitHubApiError && e.status === 500);
   assert.equal(
-    r.fake.for('GET /repos/anima-research/rayforce/issues/7').length,
+    r.fake.for('GET /repos/anima-research/example-repo/issues/7').length,
     1,
     'a bundled plugin retrying underneath would make backoff unbounded and invisible',
   );
@@ -528,7 +528,7 @@ test('octokit’s own retry plugin is off, so a 5xx is one request and the calle
 
 test('x-ratelimit-remaining is read off every answer and a low budget is warned about', async () => {
   const r = await rig();
-  r.fake.on('GET /repos/anima-research/rayforce/issues/7', {
+  r.fake.on('GET /repos/anima-research/example-repo/issues/7', {
     headers: { 'x-ratelimit-remaining': '3', 'x-ratelimit-reset': '1800000000' },
     body: ISSUE_PAYLOAD,
   });
@@ -548,7 +548,7 @@ test('x-ratelimit-remaining is read off every answer and a low budget is warned 
 
 test('an error carries the status and GitHub’s message, and no token, URL or header', async () => {
   const r = await rig();
-  r.fake.on('GET /repos/anima-research/rayforce/issues/7', {
+  r.fake.on('GET /repos/anima-research/example-repo/issues/7', {
     status: 404,
     body: { message: 'Not Found', documentation_url: 'https://docs.github.com/rest' },
   });
@@ -572,10 +572,10 @@ test('an error carries the status and GitHub’s message, and no token, URL or h
 
 test('no log line from a full session carries the token, however the calls went', async () => {
   const r = await rig({ tokenExpiresInMs: 30_000 });
-  r.fake.on('GET /repos/anima-research/rayforce/pulls/12', (_req, nth) =>
+  r.fake.on('GET /repos/anima-research/example-repo/pulls/12', (_req, nth) =>
     nth === 0 ? { status: 401, body: { message: 'Bad credentials' } } : { body: PULL_PAYLOAD },
   );
-  r.fake.on('POST /repos/anima-research/rayforce/issues/7/comments', (_req, nth) =>
+  r.fake.on('POST /repos/anima-research/example-repo/issues/7/comments', (_req, nth) =>
     nth === 0
       ? { status: 403, headers: { 'retry-after': '1' }, body: { message: 'secondary rate limit' } }
       : { status: 201, body: COMMENT_PAYLOAD },
@@ -626,7 +626,7 @@ test('listReviewThreads maps reviewThreads, isResolved and the comment chain', a
                       },
                       {
                         databaseId: 101,
-                        author: { login: 'rayforce-clone', __typename: 'Bot' },
+                        author: { login: 'example-agent', __typename: 'Bot' },
                         body: 'because',
                         createdAt: '2026-10-01T01:00:00Z',
                         lastEditedAt: '2026-10-01T02:00:00Z',
@@ -671,7 +671,7 @@ test('listReviewThreads maps reviewThreads, isResolved and the comment chain', a
       },
       {
         id: 101,
-        author: { login: 'rayforce-clone', isBot: true },
+        author: { login: 'example-agent', isBot: true },
         body: 'because',
         createdAt: '2026-10-01T01:00:00Z',
         updatedAt: '2026-10-01T02:00:00Z',
@@ -691,7 +691,7 @@ test('listReviewThreads maps reviewThreads, isResolved and the comment chain', a
   assert.match(String(sent.body.query), /isResolved/);
   assert.deepEqual(sent.body.variables, {
     owner: 'anima-research',
-    name: 'rayforce',
+    name: 'example-repo',
     number: 12,
     threads: 50,
     comments: 50,
@@ -753,7 +753,7 @@ test('reads hit the documented REST paths and map the payloads', async () => {
     labels: ['bug', 'chore'],
     createdAt: '2026-10-01T00:00:00Z',
     updatedAt: '2026-10-02T00:00:00Z',
-    html_url: 'https://github.com/anima-research/rayforce/issues/7',
+    html_url: 'https://github.com/anima-research/example-repo/issues/7',
   });
 
   const pull = await r.adapter.getPullRequest(PULL);
@@ -762,7 +762,7 @@ test('reads hit the documented REST paths and map the payloads', async () => {
   assert.deepEqual(pull.base, { ref: 'dev', sha: 'babe0000' });
   assert.equal(pull.draft, false);
   assert.equal(pull.mergeable, true);
-  assert.deepEqual(pull.author, { login: 'rayforce-clone[bot]', isBot: true });
+  assert.deepEqual(pull.author, { login: 'example-agent[bot]', isBot: true });
   assert.deepEqual(pull.requestedReviewers, ['maintainer']);
   assert.equal(pull.checksSummary, null, 'no check runs on the head sha is null, not an empty summary');
 
@@ -773,12 +773,12 @@ test('reads hit the documented REST paths and map the payloads', async () => {
   const comments = await r.adapter.listComments(ISSUE, '2026-10-01T00:00:00Z');
   assert.equal(comments.length, 1);
   assert.equal(comments[0].id, 555);
-  const commentCall = r.fake.for('GET /repos/anima-research/rayforce/issues/7/comments')[0];
+  const commentCall = r.fake.for('GET /repos/anima-research/example-repo/issues/7/comments')[0];
   assert.equal(commentCall.query.since, '2026-10-01T00:00:00Z');
   assert.equal(commentCall.query.per_page, '50', 'lists are capped at 50');
 
   const bot = await r.adapter.getAuthenticatedBot();
-  assert.deepEqual(bot, { login: 'rayforce-clone[bot]', id: 777, isBot: true });
+  assert.deepEqual(bot, { login: 'example-agent[bot]', id: 777, isBot: true });
   assert.ok(r.fake.for('GET /app')[0].headers.authorization.startsWith('Bearer '), 'GET /app is JWT-authenticated');
 
   assertNoTokenLeak(r);
@@ -795,11 +795,11 @@ test('searchIssues scopes to the repository and drops a caller’s repo: qualifi
       title: 'A bug',
       state: 'open',
       updatedAt: '2026-10-02T00:00:00Z',
-      html_url: 'https://github.com/anima-research/rayforce/issues/7',
+      html_url: 'https://github.com/anima-research/example-repo/issues/7',
     },
   ]);
   const sent = r.fake.for('GET /search/issues')[0];
-  assert.equal(sent.query.q, 'repo:anima-research/rayforce is:open flaky');
+  assert.equal(sent.query.q, 'repo:anima-research/example-repo is:open flaky');
   assert.equal(sent.query.per_page, '50');
 
   // An explicit limit is honoured but never exceeds the rendered list bound.
@@ -811,7 +811,7 @@ test('searchIssues scopes to the repository and drops a caller’s repo: qualifi
 
 test('getCheckRuns rolls a sha’s runs up and lists the failures', async () => {
   const r = await rig();
-  r.fake.on(`GET /repos/anima-research/rayforce/commits/${HEAD_SHA}/check-runs`, {
+  r.fake.on(`GET /repos/anima-research/example-repo/commits/${HEAD_SHA}/check-runs`, {
     body: {
       total_count: 4,
       check_runs: [
@@ -865,23 +865,23 @@ test('comment writes hit the issues or pulls comment path as `review` says', asy
   const r = await rig();
 
   await r.adapter.createComment(ISSUE, 'hello');
-  assert.deepEqual(r.fake.for('POST /repos/anima-research/rayforce/issues/7/comments')[0].body, { body: 'hello' });
+  assert.deepEqual(r.fake.for('POST /repos/anima-research/example-repo/issues/7/comments')[0].body, { body: 'hello' });
 
   await r.adapter.updateComment(REPO, 555, 'edited');
-  assert.deepEqual(r.fake.for('PATCH /repos/anima-research/rayforce/issues/comments/555')[0].body, { body: 'edited' });
+  assert.deepEqual(r.fake.for('PATCH /repos/anima-research/example-repo/issues/comments/555')[0].body, { body: 'edited' });
 
   const reviewEdit = await r.adapter.updateComment(REPO, 555, 'edited', true);
-  assert.equal(r.fake.for('PATCH /repos/anima-research/rayforce/pulls/comments/555').length, 1);
+  assert.equal(r.fake.for('PATCH /repos/anima-research/example-repo/pulls/comments/555').length, 1);
   assert.equal(reviewEdit.path, 'a.ts');
   assert.equal(reviewEdit.side, 'RIGHT');
 
   await r.adapter.deleteComment(REPO, 555);
-  assert.equal(r.fake.for('DELETE /repos/anima-research/rayforce/issues/comments/555').length, 1);
+  assert.equal(r.fake.for('DELETE /repos/anima-research/example-repo/issues/comments/555').length, 1);
   await r.adapter.deleteComment(REPO, 555, true);
-  assert.equal(r.fake.for('DELETE /repos/anima-research/rayforce/pulls/comments/555').length, 1);
+  assert.equal(r.fake.for('DELETE /repos/anima-research/example-repo/pulls/comments/555').length, 1);
 
   const reply = await r.adapter.replyToReviewComment(PULL, 555, 'answering');
-  assert.deepEqual(r.fake.for('POST /repos/anima-research/rayforce/pulls/12/comments/555/replies')[0].body, {
+  assert.deepEqual(r.fake.for('POST /repos/anima-research/example-repo/pulls/12/comments/555/replies')[0].body, {
     body: 'answering',
   });
   assert.equal(reply.inReplyTo, 555);
@@ -897,7 +897,7 @@ test('createReview posts the event, body and inline comments', async () => {
   });
 
   assert.deepEqual(review, { id: 909, state: 'changes_requested', html_url: 'https://github.com/x#pullrequestreview-909' });
-  assert.deepEqual(r.fake.for('POST /repos/anima-research/rayforce/pulls/12/reviews')[0].body, {
+  assert.deepEqual(r.fake.for('POST /repos/anima-research/example-repo/pulls/12/reviews')[0].body, {
     event: 'REQUEST_CHANGES',
     body: 'two things',
     comments: [{ path: 'src/a.ts', line: 12, side: 'RIGHT', body: 'this one' }],
@@ -905,17 +905,17 @@ test('createReview posts the event, body and inline comments', async () => {
 
   // A bare COMMENT review sends no empty `comments` array.
   await r.adapter.createReview(PULL, { event: 'COMMENT' });
-  assert.deepEqual(r.fake.for('POST /repos/anima-research/rayforce/pulls/12/reviews')[1].body, { event: 'COMMENT' });
+  assert.deepEqual(r.fake.for('POST /repos/anima-research/example-repo/pulls/12/reviews')[1].body, { event: 'COMMENT' });
 });
 
 test('issue create, edit and close-with-reason go through one PATCH', async () => {
   const r = await rig();
 
   await r.adapter.createIssue(REPO, { title: 'New', body: 'text' });
-  assert.deepEqual(r.fake.for('POST /repos/anima-research/rayforce/issues')[0].body, { title: 'New', body: 'text' });
+  assert.deepEqual(r.fake.for('POST /repos/anima-research/example-repo/issues')[0].body, { title: 'New', body: 'text' });
 
   const closed = await r.adapter.updateIssue(ISSUE, { state: 'closed', stateReason: 'not_planned' });
-  assert.deepEqual(r.fake.for('PATCH /repos/anima-research/rayforce/issues/7')[0].body, {
+  assert.deepEqual(r.fake.for('PATCH /repos/anima-research/example-repo/issues/7')[0].body, {
     state: 'closed',
     state_reason: 'not_planned',
   });
@@ -924,14 +924,14 @@ test('issue create, edit and close-with-reason go through one PATCH', async () =
 
   // An absent field is absent from the body, not sent as null.
   await r.adapter.updateIssue(ISSUE, { title: 'Retitled' });
-  assert.deepEqual(r.fake.for('PATCH /repos/anima-research/rayforce/issues/7')[1].body, { title: 'Retitled' });
+  assert.deepEqual(r.fake.for('PATCH /repos/anima-research/example-repo/issues/7')[1].body, { title: 'Retitled' });
 });
 
 test('pull request create, retarget, reviewers — and the draft flag through GraphQL', async () => {
   const r = await rig();
 
   await r.adapter.createPullRequest(REPO, { head: 'fix/thing', base: 'dev', title: 'Fix it', body: 'the fix', draft: true });
-  assert.deepEqual(r.fake.for('POST /repos/anima-research/rayforce/pulls')[0].body, {
+  assert.deepEqual(r.fake.for('POST /repos/anima-research/example-repo/pulls')[0].body, {
     head: 'fix/thing',
     base: 'dev',
     title: 'Fix it',
@@ -940,7 +940,7 @@ test('pull request create, retarget, reviewers — and the draft flag through Gr
   });
 
   const retargeted = await r.adapter.updatePullRequest(PULL, { title: 'Retitled', base: 'dev' });
-  assert.deepEqual(r.fake.for('PATCH /repos/anima-research/rayforce/pulls/12')[0].body, {
+  assert.deepEqual(r.fake.for('PATCH /repos/anima-research/example-repo/pulls/12')[0].body, {
     title: 'Retitled',
     base: 'dev',
   });
@@ -948,12 +948,12 @@ test('pull request create, retarget, reviewers — and the draft flag through Gr
   assert.equal(r.fake.for('POST /graphql').length, 0, 'no draft change means no mutation');
 
   await r.adapter.requestReviewers(PULL, ['maintainer', 'other']);
-  assert.deepEqual(r.fake.for('POST /repos/anima-research/rayforce/pulls/12/requested_reviewers')[0].body, {
+  assert.deepEqual(r.fake.for('POST /repos/anima-research/example-repo/pulls/12/requested_reviewers')[0].body, {
     reviewers: ['maintainer', 'other'],
   });
 
   // REST cannot convert a PR to draft; GraphQL can, and the adapter re-reads.
-  r.fake.on('GET /repos/anima-research/rayforce/pulls/12', (_req, nth) =>
+  r.fake.on('GET /repos/anima-research/example-repo/pulls/12', (_req, nth) =>
     nth === 0 ? { body: PULL_PAYLOAD } : { body: { ...PULL_PAYLOAD, draft: true } },
   );
   const drafted = await r.adapter.updatePullRequest(PULL, { draft: true });
@@ -963,12 +963,12 @@ test('pull request create, retarget, reviewers — and the draft flag through Gr
   assert.equal(drafted.draft, true);
 
   // Already a draft: no mutation is sent.
-  r.fake.on('GET /repos/anima-research/rayforce/pulls/12', { body: { ...PULL_PAYLOAD, draft: true } });
+  r.fake.on('GET /repos/anima-research/example-repo/pulls/12', { body: { ...PULL_PAYLOAD, draft: true } });
   await r.adapter.updatePullRequest(PULL, { draft: true });
   assert.equal(r.fake.for('POST /graphql').length, 1, 'a no-op draft change sends nothing');
 
   // Ready for review takes the other mutation.
-  r.fake.on('GET /repos/anima-research/rayforce/pulls/12', (_req, nth) =>
+  r.fake.on('GET /repos/anima-research/example-repo/pulls/12', (_req, nth) =>
     nth === 0 ? { body: { ...PULL_PAYLOAD, draft: true } } : { body: PULL_PAYLOAD },
   );
   await r.adapter.updatePullRequest(PULL, { draft: false });
@@ -983,7 +983,7 @@ test('pull request create, retarget, reviewers — and the draft flag through Gr
 test('listIssuesSince asks the documented query and fills the head sha of open PRs', async () => {
   const r = await rig();
   const since = '2026-10-10T00:00:00Z';
-  r.fake.on('GET /repos/anima-research/rayforce/issues', {
+  r.fake.on('GET /repos/anima-research/example-repo/issues', {
     body: [
       { ...ISSUE_PAYLOAD, id: 1, number: 7 },
       { ...ISSUE_PAYLOAD, id: 2, number: 12, pull_request: { url: 'x' }, state: 'open' },
@@ -993,16 +993,16 @@ test('listIssuesSince asks the documented query and fills the head sha of open P
         number: 13,
         pull_request: { url: 'x' },
         state: 'closed',
-        closed_by: { login: 'rayforce-clone[bot]', type: 'Bot' },
+        closed_by: { login: 'example-agent[bot]', type: 'Bot' },
       },
     ],
   });
 
   const rows = await r.adapter.listIssuesSince(REPO, since);
   // The list carries closed_by; a closed row is attributed to its closer.
-  assert.deepEqual(rows[2].closedBy, { login: 'rayforce-clone[bot]', isBot: true });
+  assert.deepEqual(rows[2].closedBy, { login: 'example-agent[bot]', isBot: true });
   assert.equal(rows[0].closedBy, undefined);
-  const query = r.fake.for('GET /repos/anima-research/rayforce/issues')[0].query;
+  const query = r.fake.for('GET /repos/anima-research/example-repo/issues')[0].query;
   assert.equal(query.state, 'all');
   assert.equal(query.sort, 'updated');
   assert.equal(query.since, since);
@@ -1017,19 +1017,19 @@ test('listIssuesSince asks the documented query and fills the head sha of open P
     ],
   );
   // Exactly one head read: the closed PR and the issue cost nothing.
-  assert.equal(r.fake.for('GET /repos/anima-research/rayforce/pulls/12').length, 1);
+  assert.equal(r.fake.for('GET /repos/anima-research/example-repo/pulls/12').length, 1);
 });
 
 test('the issues poll pages up to its documented bound and no further', async () => {
   const r = await rig();
   const page = (n: number) =>
     Array.from({ length: 100 }, (_, i) => ({ ...ISSUE_PAYLOAD, id: n * 1000 + i, number: n * 1000 + i }));
-  r.fake.on('GET /repos/anima-research/rayforce/issues', (req) => ({ body: page(Number(req.query.page)) }));
+  r.fake.on('GET /repos/anima-research/example-repo/issues', (req) => ({ body: page(Number(req.query.page)) }));
 
   const rows = await r.adapter.listIssuesSince(REPO, '2026-10-10T00:00:00Z');
   assert.equal(rows.length, POLL_MAX_ENTRIES);
   assert.deepEqual(
-    r.fake.for('GET /repos/anima-research/rayforce/issues').map((c) => c.query.page),
+    r.fake.for('GET /repos/anima-research/example-repo/issues').map((c) => c.query.page),
     ['1', '2', '3'],
   );
   assert.ok(
@@ -1040,7 +1040,7 @@ test('the issues poll pages up to its documented bound and no further', async ()
 
 test('a poll never reads more than the amendment’s 20 PR heads', async () => {
   const r = await rig();
-  r.fake.on('GET /repos/anima-research/rayforce/issues', {
+  r.fake.on('GET /repos/anima-research/example-repo/issues', {
     body: Array.from({ length: 30 }, (_, i) => ({
       ...ISSUE_PAYLOAD,
       id: i,
@@ -1050,7 +1050,7 @@ test('a poll never reads more than the amendment’s 20 PR heads', async () => {
     })),
   });
   for (let i = 0; i < 30; i++) {
-    r.fake.on(`GET /repos/anima-research/rayforce/pulls/${100 + i}`, {
+    r.fake.on(`GET /repos/anima-research/example-repo/pulls/${100 + i}`, {
       body: { ...PULL_PAYLOAD, number: 100 + i },
     });
   }
@@ -1062,17 +1062,17 @@ test('a poll never reads more than the amendment’s 20 PR heads', async () => {
 test('the comment polls carry the issue or pull number the comment hangs on', async () => {
   const r = await rig();
   const since = '2026-10-10T00:00:00Z';
-  r.fake.on('GET /repos/anima-research/rayforce/issues/comments', {
-    body: [{ ...COMMENT_PAYLOAD, issue_url: 'https://api.github.com/repos/anima-research/rayforce/issues/7' }],
+  r.fake.on('GET /repos/anima-research/example-repo/issues/comments', {
+    body: [{ ...COMMENT_PAYLOAD, issue_url: 'https://api.github.com/repos/anima-research/example-repo/issues/7' }],
   });
-  r.fake.on('GET /repos/anima-research/rayforce/pulls/comments', {
+  r.fake.on('GET /repos/anima-research/example-repo/pulls/comments', {
     body: [
       {
         ...COMMENT_PAYLOAD,
         id: 556,
         path: 'src/a.ts',
         in_reply_to_id: 555,
-        pull_request_url: 'https://api.github.com/repos/anima-research/rayforce/pulls/12',
+        pull_request_url: 'https://api.github.com/repos/anima-research/example-repo/pulls/12',
       },
     ],
   });
@@ -1081,14 +1081,14 @@ test('the comment polls carry the issue or pull number the comment hangs on', as
   assert.equal(issueComments.length, 1);
   assert.equal(issueComments[0].number, 7);
   assert.equal(issueComments[0].path, undefined);
-  assert.equal(r.fake.for('GET /repos/anima-research/rayforce/issues/comments')[0].query.sort, 'updated');
-  assert.equal(r.fake.for('GET /repos/anima-research/rayforce/issues/comments')[0].query.since, since);
+  assert.equal(r.fake.for('GET /repos/anima-research/example-repo/issues/comments')[0].query.sort, 'updated');
+  assert.equal(r.fake.for('GET /repos/anima-research/example-repo/issues/comments')[0].query.since, since);
 
   const reviewComments = await r.adapter.listReviewCommentsSince(REPO, since);
   assert.equal(reviewComments[0].number, 12);
   assert.equal(reviewComments[0].path, 'src/a.ts');
   assert.equal(reviewComments[0].inReplyTo, 555);
-  assert.equal(r.fake.for('GET /repos/anima-research/rayforce/pulls/comments')[0].query.since, since);
+  assert.equal(r.fake.for('GET /repos/anima-research/example-repo/pulls/comments')[0].query.since, since);
   assertNoTokenLeak(r);
 });
 
@@ -1114,14 +1114,14 @@ test('redactSecrets scrubs token forms and URL userinfo, and leaves prose alone'
   assert.equal(redactSecrets('header was token 0123456789abcdef'), `header was ${REDACTED}`);
   // An ordinary message and an ordinary URL come through untouched.
   assert.equal(
-    redactSecrets('Not Found — see https://api.github.com/repos/anima-research/rayforce'),
-    'Not Found — see https://api.github.com/repos/anima-research/rayforce',
+    redactSecrets('Not Found — see https://api.github.com/repos/anima-research/example-repo'),
+    'Not Found — see https://api.github.com/repos/anima-research/example-repo',
   );
 });
 
 test('a GitHub error that reflects the live token back redacts it everywhere', async () => {
   const r = await rig();
-  r.fake.on('GET /repos/anima-research/rayforce/issues/7', {
+  r.fake.on('GET /repos/anima-research/example-repo/issues/7', {
     status: 422,
     body: { message: `Bad credentials for ${TOKEN} on this installation` },
   });
@@ -1148,7 +1148,7 @@ test('a token with no recognizable shape is still redacted, because its value is
   const r = await rig({ token: opaque });
   assert.equal(redactSecrets(opaque), opaque, 'the premise: no pattern matches this token');
 
-  r.fake.on('GET /repos/anima-research/rayforce/issues/7', {
+  r.fake.on('GET /repos/anima-research/example-repo/issues/7', {
     status: 401,
     body: { message: `credentials ${opaque} are not valid` },
   });
@@ -1166,7 +1166,7 @@ test('a token with no recognizable shape is still redacted, because its value is
 
 test('a credential-bearing URL reflected in an error loses its userinfo', async () => {
   const r = await rig();
-  r.fake.on('GET /repos/anima-research/rayforce/issues/7', {
+  r.fake.on('GET /repos/anima-research/example-repo/issues/7', {
     status: 502,
     body: { message: 'upstream https://octocat:hunter2@api.github.com/repos/x refused the connection' },
   });
@@ -1204,7 +1204,7 @@ test('a log line built from a reflected secret is redacted too', async () => {
   const r = await rig();
   // The retry warning carries the operation, but the rate-limit path also logs
   // what GitHub said; drive a secondary limit whose message quotes the token.
-  r.fake.on('POST /repos/anima-research/rayforce/issues/7/comments', {
+  r.fake.on('POST /repos/anima-research/example-repo/issues/7/comments', {
     status: 403,
     headers: { 'retry-after': '1' },
     body: { message: `secondary rate limit hit by ${TOKEN}` },
@@ -1234,7 +1234,7 @@ function successRuns(from: number, count: number) {
 
 test('getCheckRuns follows pages, so a failure on page two is not reported as success', async () => {
   const r = await rig();
-  r.fake.on(`GET /repos/anima-research/rayforce/commits/${HEAD_SHA}/check-runs`, (req) => ({
+  r.fake.on(`GET /repos/anima-research/example-repo/commits/${HEAD_SHA}/check-runs`, (req) => ({
     body: {
       total_count: 101,
       check_runs:
@@ -1249,21 +1249,21 @@ test('getCheckRuns follows pages, so a failure on page two is not reported as su
   assert.equal(summary.conclusion, 'failure', 'a failure on page two is a failure');
   assert.deepEqual(summary.failed, [{ name: 'late-failure', url: 'https://ci/late' }]);
   assert.deepEqual(
-    r.fake.for(`GET /repos/anima-research/rayforce/commits/${HEAD_SHA}/check-runs`).map((c) => c.query.page),
+    r.fake.for(`GET /repos/anima-research/example-repo/commits/${HEAD_SHA}/check-runs`).map((c) => c.query.page),
     ['1', '2'],
   );
 });
 
 test('a sha with more check runs than the page bound is undecided, never success', async () => {
   const r = await rig();
-  r.fake.on(`GET /repos/anima-research/rayforce/commits/${HEAD_SHA}/check-runs`, (req) => ({
+  r.fake.on(`GET /repos/anima-research/example-repo/commits/${HEAD_SHA}/check-runs`, (req) => ({
     body: { total_count: 1000, check_runs: successRuns((Number(req.query.page) - 1) * 100, 100) },
   }));
 
   const summary = await r.adapter.getCheckRuns(REPO, HEAD_SHA);
   assert.equal(summary.conclusion, null, 'what was not read cannot be called green');
   assert.equal(summary.total, 1000);
-  assert.equal(r.fake.for(`GET /repos/anima-research/rayforce/commits/${HEAD_SHA}/check-runs`).length, 5);
+  assert.equal(r.fake.for(`GET /repos/anima-research/example-repo/commits/${HEAD_SHA}/check-runs`).length, 5);
   assert.ok(
     r.logs.some((l) => l.startsWith('warn check runs did not fit')),
     `expected a truncation warning, got ${JSON.stringify(r.logs)}`,
@@ -1272,14 +1272,14 @@ test('a sha with more check runs than the page bound is undecided, never success
 
 test('a single complete page still stops at one request', async () => {
   const r = await rig();
-  r.fake.on(`GET /repos/anima-research/rayforce/commits/${HEAD_SHA}/check-runs`, {
+  r.fake.on(`GET /repos/anima-research/example-repo/commits/${HEAD_SHA}/check-runs`, {
     body: { total_count: 2, check_runs: successRuns(0, 2) },
   });
 
   const summary = await r.adapter.getCheckRuns(REPO, HEAD_SHA);
   assert.equal(summary.conclusion, 'success');
   assert.equal(summary.total, 2);
-  assert.equal(r.fake.for(`GET /repos/anima-research/rayforce/commits/${HEAD_SHA}/check-runs`).length, 1);
+  assert.equal(r.fake.for(`GET /repos/anima-research/example-repo/commits/${HEAD_SHA}/check-runs`).length, 1);
 });
 
 test('summarizeChecks refuses to call a truncated read success', () => {
@@ -1306,7 +1306,7 @@ test('summarizeChecks refuses to call a truncated read success', () => {
 
 test('a secondary limit with no Retry-After waits the minute GitHub asks for', async () => {
   const r = await rig();
-  r.fake.on('POST /repos/anima-research/rayforce/issues/7/comments', (_req, nth) =>
+  r.fake.on('POST /repos/anima-research/example-repo/issues/7/comments', (_req, nth) =>
     nth === 0
       ? {
           // No `retry-after`, and the budget is not spent: only the message
@@ -1320,7 +1320,7 @@ test('a secondary limit with no Retry-After waits the minute GitHub asks for', a
   const comment = await r.adapter.createComment(ISSUE, 'hello');
   assert.equal(comment.id, 555);
   assert.deepEqual(r.sleeps, [60_000], 'retrying a secondary limit sooner than a minute earns the next one');
-  assert.equal(r.fake.for('POST /repos/anima-research/rayforce/issues/7/comments').length, 2);
+  assert.equal(r.fake.for('POST /repos/anima-research/example-repo/issues/7/comments').length, 2);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1343,13 +1343,13 @@ test('a failure minting the installation token keeps its status and names the mi
   assert.equal(err.githubMessage, 'Resource not accessible by integration');
   assert.equal(err.operation, 'mintInstallationToken');
   // The call it was blocking never went out.
-  assert.equal(r.fake.for('GET /repos/anima-research/rayforce/issues/7').length, 0);
+  assert.equal(r.fake.for('GET /repos/anima-research/example-repo/issues/7').length, 0);
   assertNoTokenLeak(r, [renderError(err)]);
 });
 
 test('a failure discovering the installation keeps its status and names the discovery', async () => {
   const r = await rig({ env: { GITHUB_APP_INSTALLATION_ID: undefined } });
-  r.fake.on('GET /repos/anima-research/rayforce/installation', {
+  r.fake.on('GET /repos/anima-research/example-repo/installation', {
     status: 404,
     body: { message: 'Not Found' },
   });
@@ -1388,7 +1388,7 @@ test('an auth failure on a GraphQL call keeps its status too', async () => {
 
 test('octokit’s deprecation warning reaches the injected Logger, not stderr', async () => {
   const r = await rig();
-  r.fake.on('GET /repos/anima-research/rayforce/issues/7', {
+  r.fake.on('GET /repos/anima-research/example-repo/issues/7', {
     headers: { deprecation: 'true', sunset: '2026-12-01' },
     body: ISSUE_PAYLOAD,
   });
@@ -1417,7 +1417,7 @@ test('an octokit diagnostic is redacted like any other log line', async () => {
   const r = await rig();
   // The deprecation warning quotes the request URL back; make that URL carry
   // something that must not be logged.
-  r.fake.on(`GET /repos/anima-research/rayforce/commits/ghs_LEAKED_IN_A_URL/check-runs`, {
+  r.fake.on(`GET /repos/anima-research/example-repo/commits/ghs_LEAKED_IN_A_URL/check-runs`, {
     headers: { deprecation: 'true', sunset: '2026-12-01' },
     body: { total_count: 0, check_runs: [] },
   });
@@ -1459,16 +1459,16 @@ test('a token still in flight when a refresh replaces it is redacted all the sam
   const held = new Promise<Answer>((resolve) => {
     release = resolve;
   });
-  r.fake.on('GET /repos/anima-research/rayforce/issues/7', () => held);
+  r.fake.on('GET /repos/anima-research/example-repo/issues/7', () => held);
 
   const inFlight = r.adapter.getIssue(ISSUE).then(
     () => null,
     (e: unknown) => e as GitHubApiError,
   );
-  await waitFor(() => r.fake.for('GET /repos/anima-research/rayforce/issues/7').length === 1, 'the held request');
+  await waitFor(() => r.fake.for('GET /repos/anima-research/example-repo/issues/7').length === 1, 'the held request');
   assert.deepEqual(issued, [TOKEN_A]);
   assert.equal(
-    r.fake.for('GET /repos/anima-research/rayforce/issues/7')[0].headers.authorization,
+    r.fake.for('GET /repos/anima-research/example-repo/issues/7')[0].headers.authorization,
     `token ${TOKEN_A}`,
     'the held request really is carrying token A',
   );
@@ -1539,16 +1539,16 @@ test('no rotation ages a credential out while the request that sent it is unreso
   const held = new Promise<Answer>((resolve) => {
     release = resolve;
   });
-  r.fake.on('GET /repos/anima-research/rayforce/issues/7', () => held);
+  r.fake.on('GET /repos/anima-research/example-repo/issues/7', () => held);
 
   const inFlight = r.adapter.getIssue(ISSUE).then(
     () => null,
     (e: unknown) => e as GitHubApiError,
   );
-  await waitFor(() => r.fake.for('GET /repos/anima-research/rayforce/issues/7').length === 1, 'the held request');
+  await waitFor(() => r.fake.for('GET /repos/anima-research/example-repo/issues/7').length === 1, 'the held request');
   const tokenA = issued[0];
   assert.equal(
-    r.fake.for('GET /repos/anima-research/rayforce/issues/7')[0].headers.authorization,
+    r.fake.for('GET /repos/anima-research/example-repo/issues/7')[0].headers.authorization,
     `token ${tokenA}`,
     'the held request really is carrying the first token',
   );
@@ -1556,7 +1556,7 @@ test('no rotation ages a credential out while the request that sent it is unreso
 
   // Ten sequential calls, each refused once and retried, which mints a fresh
   // token every time. No clock advance: rotation alone drives this.
-  r.fake.on('GET /repos/anima-research/rayforce/issues/7/comments', (_req, nth) =>
+  r.fake.on('GET /repos/anima-research/example-repo/issues/7/comments', (_req, nth) =>
     nth % 2 === 0 ? { status: 401, body: { message: 'Bad credentials' } } : { body: [COMMENT_PAYLOAD] },
   );
   const ROTATIONS = 10;
@@ -1603,7 +1603,7 @@ test('retention is by validity, so a credential GitHub would refuse is not kept 
   await r.adapter.getIssue(ISSUE);
   assert.ok(issued.length >= 2, 'the expired token was replaced');
 
-  r.fake.on('GET /repos/anima-research/rayforce/issues/7', {
+  r.fake.on('GET /repos/anima-research/example-repo/issues/7', {
     status: 422,
     body: { message: `stale ${early} and current ${issued[issued.length - 1]}` },
   });
