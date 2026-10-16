@@ -1,6 +1,5 @@
 /**
- * state.ts — checkpoint lineage, rollback planning, and the atomic state file
- * (TASK-SRHKG.1.7).
+ * state.ts — checkpoint lineage, rollback planning, and the atomic state file.
  *
  * Every test works in its own temp directory; nothing here touches the network
  * or a real state file path.
@@ -15,7 +14,7 @@ import { test } from 'node:test';
 import { GithubState, ROOT_BUCKET, STATE_VERSION, type GithubStateSnapshot } from '../src/state.js';
 import { POLL_DEDUP_RING, POLL_HEAD_MEMORY, type Logger } from '../src/types.js';
 
-const REPO = 'anima-research/rayforce';
+const REPO = 'anima-research/example-repo';
 
 function tempFile(name = 'state.json'): string {
   return join(mkdtempSync(join(tmpdir(), 'github-mcpl-state-')), name);
@@ -272,17 +271,17 @@ test('the poll dedup ring remembers the last 2000 keys and no more', () => {
 
 test('the polled heads are bounded, oldest out first, and re-recording a head refreshes its place', async () => {
   const state = GithubState.empty();
-  assert.equal(state.polledHead('github:anima-research/rayforce#58'), null);
-  state.setPolledHead('github:anima-research/rayforce#58', 'a'.repeat(40));
-  assert.equal(state.polledHead('github:anima-research/rayforce#58'), 'a'.repeat(40));
+  assert.equal(state.polledHead('github:anima-research/example-repo#58'), null);
+  state.setPolledHead('github:anima-research/example-repo#58', 'a'.repeat(40));
+  assert.equal(state.polledHead('github:anima-research/example-repo#58'), 'a'.repeat(40));
   // Last write wins: this is "the head the last pass saw", not a history.
-  state.setPolledHead('github:anima-research/rayforce#58', 'b'.repeat(40));
-  assert.equal(state.polledHead('github:anima-research/rayforce#58'), 'b'.repeat(40));
+  state.setPolledHead('github:anima-research/example-repo#58', 'b'.repeat(40));
+  assert.equal(state.polledHead('github:anima-research/example-repo#58'), 'b'.repeat(40));
 
   // Bounded, and the *oldest* entry is the one that goes.
   for (let i = 0; i < POLL_HEAD_MEMORY; i++) state.setPolledHead(`github:${REPO}#${1000 + i}`, 'c'.repeat(40));
   assert.equal(Object.keys(state.snapshot().pollHeads).length, POLL_HEAD_MEMORY);
-  assert.equal(state.polledHead('github:anima-research/rayforce#58'), null);
+  assert.equal(state.polledHead('github:anima-research/example-repo#58'), null);
   assert.equal(state.polledHead(`github:${REPO}#${1000 + POLL_HEAD_MEMORY - 1}`), 'c'.repeat(40));
 
   // Re-recording an unchanged head refreshes its place in the eviction order,
@@ -328,10 +327,10 @@ test('poll cursors and announced rows round-trip through a flush, and a cursor w
   const file = tempFile();
   const first = GithubState.load(file, capturingLogger());
   first.setPollCursors({
-    'anima-research/rayforce:issues': { since: '2026-10-14T00:00:00.000Z', resumeAt: '2026-10-14T06:00:00Z' },
-    'anima-research/rayforce:issue_comments': { since: '2026-10-14T07:00:00.000Z' },
+    'anima-research/example-repo:issues': { since: '2026-10-14T00:00:00.000Z', resumeAt: '2026-10-14T06:00:00Z' },
+    'anima-research/example-repo:issue_comments': { since: '2026-10-14T07:00:00.000Z' },
   });
-  first.setPolledNew({ 'anima-research/rayforce:issues': { '7': '2026-10-14T01:00:00Z' } });
+  first.setPolledNew({ 'anima-research/example-repo:issues': { '7': '2026-10-14T01:00:00Z' } });
   await first.flush();
   const onDisk = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
   onDisk.pollCursors = {
@@ -351,12 +350,12 @@ test('poll cursors and announced rows round-trip through a flush, and a cursor w
 
   const loaded = GithubState.load(file, capturingLogger());
   assert.deepEqual(loaded.pollCursors(), {
-    'anima-research/rayforce:issues': { since: '2026-10-14T00:00:00.000Z', resumeAt: '2026-10-14T06:00:00Z' },
-    'anima-research/rayforce:issue_comments': { since: '2026-10-14T07:00:00.000Z' },
+    'anima-research/example-repo:issues': { since: '2026-10-14T00:00:00.000Z', resumeAt: '2026-10-14T06:00:00Z' },
+    'anima-research/example-repo:issue_comments': { since: '2026-10-14T07:00:00.000Z' },
     'x/z:issue_comments': { since: '2026-10-14T07:00:00.000Z' },
   });
   assert.deepEqual(loaded.polledNew(), {
-    'anima-research/rayforce:issues': { '7': '2026-10-14T01:00:00Z' },
+    'anima-research/example-repo:issues': { '7': '2026-10-14T01:00:00Z' },
     'x/y:issues': {},
     'x/z:issues': { '4': '2026-10-14T02:00:00Z' },
   });
@@ -395,18 +394,18 @@ test('a lastPollAt that is null or left out loads quietly', () => {
 test('a polled head round-trips through a flush (amendment 2a)', async () => {
   const file = tempFile();
   const first = GithubState.load(file, capturingLogger());
-  first.setPolledHead('github:anima-research/rayforce#58', 'e'.repeat(40));
+  first.setPolledHead('github:anima-research/example-repo#58', 'e'.repeat(40));
   await first.flush();
 
   const reloaded = GithubState.load(file, capturingLogger());
-  assert.equal(reloaded.polledHead('github:anima-research/rayforce#58'), 'e'.repeat(40));
+  assert.equal(reloaded.polledHead('github:anima-research/example-repo#58'), 'e'.repeat(40));
   // A non-string value in the file is dropped rather than trusted.
   const raw = readSnapshot(file) as unknown as { pollHeads: Record<string, unknown> };
-  raw.pollHeads['github:anima-research/rayforce#59'] = 42;
+  raw.pollHeads['github:anima-research/example-repo#59'] = 42;
   writeFileSync(file, JSON.stringify(raw));
   const third = GithubState.load(file, capturingLogger());
-  assert.equal(third.polledHead('github:anima-research/rayforce#59'), null);
-  assert.equal(third.polledHead('github:anima-research/rayforce#58'), 'e'.repeat(40));
+  assert.equal(third.polledHead('github:anima-research/example-repo#59'), null);
+  assert.equal(third.polledHead('github:anima-research/example-repo#58'), 'e'.repeat(40));
 });
 
 test('a checkpoint abandoned by an earlier rollback is refused, not accepted empty', () => {

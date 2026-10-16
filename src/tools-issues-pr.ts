@@ -1,6 +1,5 @@
 /**
- * github.issues and github.pr — the issue and pull-request write tools
- * (TASK-SRHKG.1.6).
+ * github.issues and github.pr — the issue and pull-request write tools.
  *
  *   github.issues: create_issue, edit_issue, close_issue, reopen_issue
  *   github.pr:     create_pull_request, edit_pull_request, request_review

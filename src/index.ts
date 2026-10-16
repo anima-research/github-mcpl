@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * github-mcpl — CLI entry point (TASK-SRHKG.1.9).
+ * github-mcpl — CLI entry point.
  *
  * Usage:
  *   github-mcpl --stdio        # MCP-compatible stdio transport

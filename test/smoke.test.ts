@@ -1,7 +1,7 @@
 /**
- * Skeleton smoke test (TASK-SRHKG.1.1).
+ * Skeleton smoke test.
  *
- * Proves the three things the work packages .2 to .8 start from: the harness
+ * Proves the three things every module starts from: the harness
  * builds the server over a stream pair and tears it down, FakeGitHubApi
  * answers a read and records the call, and readConfig rejects a bad
  * environment by variable name without leaking a secret.
@@ -142,7 +142,7 @@ test('readConfig rejects a missing GITHUB_REPOS by name', () => {
   const env: Env = {
     GITHUB_APP_ID: '12345',
     GITHUB_APP_PRIVATE_KEY_FILE: pem,
-    GITHUB_BOT_LOGIN: 'rayforce-clone[bot]',
+    GITHUB_BOT_LOGIN: 'example-agent[bot]',
   };
 
   assert.throws(
@@ -171,9 +171,9 @@ test('readConfig validates a whole environment', () => {
     GITHUB_WEBHOOK_SECRET_FILE: secret,
     GITHUB_WEBHOOK_PORT: '8443',
     GITHUB_POLL_INTERVAL_MS: '60000',
-    GITHUB_REPOS: 'anima-research/rayforce',
+    GITHUB_REPOS: 'anima-research/example-repo',
     GITHUB_PR_BASE_ALLOW: 'dev',
-    GITHUB_BOT_LOGIN: 'rayforce-clone[bot]',
+    GITHUB_BOT_LOGIN: 'example-agent[bot]',
     GITHUB_MAINTAINERS: 'human-one, human-two',
   });
 
@@ -205,8 +205,8 @@ test('readConfig ignores the webhook secret file while the listener is off', () 
     GITHUB_APP_PRIVATE_KEY_FILE: pem,
     GITHUB_WEBHOOK_SECRET_FILE: secret,
     GITHUB_POLL_INTERVAL_MS: '60000',
-    GITHUB_REPOS: 'anima-research/rayforce',
-    GITHUB_BOT_LOGIN: 'rayforce-clone[bot]',
+    GITHUB_REPOS: 'anima-research/example-repo',
+    GITHUB_BOT_LOGIN: 'example-agent[bot]',
   });
   assert.equal(config.webhookPort, null);
   assert.equal(config.webhookSecret, null);
@@ -218,8 +218,8 @@ test('readConfig ignores the webhook secret file while the listener is off', () 
       GITHUB_APP_PRIVATE_KEY_FILE: pem,
       GITHUB_WEBHOOK_SECRET_FILE: secret,
       GITHUB_WEBHOOK_PORT: '8443',
-      GITHUB_REPOS: 'anima-research/rayforce',
-      GITHUB_BOT_LOGIN: 'rayforce-clone[bot]',
+      GITHUB_REPOS: 'anima-research/example-repo',
+      GITHUB_BOT_LOGIN: 'example-agent[bot]',
     }),
     (err: unknown) => err instanceof ConfigError && /GITHUB_WEBHOOK_SECRET_FILE: .* is empty/.test(err.message),
   );
@@ -232,13 +232,13 @@ test('readConfig accepts several repositories of one owner, and a per-repository
   const base = {
     GITHUB_APP_ID: '12345',
     GITHUB_APP_PRIVATE_KEY_FILE: pem,
-    GITHUB_BOT_LOGIN: 'rayforce-clone[bot]',
+    GITHUB_BOT_LOGIN: 'example-agent[bot]',
   };
 
   const config = readConfig({
     ...base,
-    GITHUB_REPOS: 'anima-research/rayforce, anima-research/chronicle',
-    GITHUB_PR_BASE_ALLOW: 'anima-research/rayforce:dev,main',
+    GITHUB_REPOS: 'anima-research/example-repo, anima-research/chronicle',
+    GITHUB_PR_BASE_ALLOW: 'anima-research/example-repo:dev,main',
   });
   assert.deepEqual(config.repos, [TEST_REPO, { owner: 'anima-research', name: 'chronicle' }]);
   assert.deepEqual(allowedBases(TEST_REPO, config.prBaseAllow), ['dev', 'main']);
@@ -254,19 +254,19 @@ test('readConfig accepts several repositories of one owner, and a per-repository
     assert.fail('expected a ConfigError');
   };
   // One owner is one App installation and one token; a second owner is a second process.
-  assert.match(problems({ GITHUB_REPOS: 'anima-research/rayforce,other-org/thing' })[0], /must share one owner/);
-  assert.match(problems({ GITHUB_REPOS: 'anima-research/rayforce,anima-research/rayforce' })[0], /listed twice/);
+  assert.match(problems({ GITHUB_REPOS: 'anima-research/example-repo,other-org/thing' })[0], /must share one owner/);
+  assert.match(problems({ GITHUB_REPOS: 'anima-research/example-repo,anima-research/example-repo' })[0], /listed twice/);
   // A scoped entry has to name a repository the server serves, so a typo is a startup error.
   assert.match(
-    problems({ GITHUB_REPOS: 'anima-research/rayforce', GITHUB_PR_BASE_ALLOW: 'anima-research/chronicle:main' })[0],
+    problems({ GITHUB_REPOS: 'anima-research/example-repo', GITHUB_PR_BASE_ALLOW: 'anima-research/chronicle:main' })[0],
     /names a repository outside GITHUB_REPOS/,
   );
-  assert.match(problems({ GITHUB_REPOS: 'anima-research/rayforce', GITHUB_PR_BASE_ALLOW: 'rayforce:' })[0], /neither a branch nor/);
+  assert.match(problems({ GITHUB_REPOS: 'anima-research/example-repo', GITHUB_PR_BASE_ALLOW: 'example-repo:' })[0], /neither a branch nor/);
 });
 
 test('readConfig names every problem at once', () => {
   assert.throws(
-    () => readConfig({ GITHUB_REPOS: 'rayforce', GITHUB_WEBHOOK_PORT: '0' }),
+    () => readConfig({ GITHUB_REPOS: 'example-repo', GITHUB_WEBHOOK_PORT: '0' }),
     (err: unknown) => {
       assert.ok(err instanceof ConfigError);
       const named = err.problems.map((p) => p.split(':')[0]).sort();
@@ -292,8 +292,8 @@ test('readConfig refuses a secret file readable by anyone else', () => {
       readConfig({
         GITHUB_APP_ID: '12345',
         GITHUB_APP_PRIVATE_KEY_FILE: pem,
-        GITHUB_REPOS: 'anima-research/rayforce',
-        GITHUB_BOT_LOGIN: 'rayforce-clone[bot]',
+        GITHUB_REPOS: 'anima-research/example-repo',
+        GITHUB_BOT_LOGIN: 'example-agent[bot]',
       }),
     (err: unknown) => {
       assert.ok(err instanceof ConfigError);
@@ -304,14 +304,14 @@ test('readConfig refuses a secret file readable by anyone else', () => {
 });
 
 test('channel and thread ids round-trip', () => {
-  assert.equal(channelId(ISSUE), 'github:anima-research/rayforce#7');
-  assert.deepEqual(parseChannelId('github:anima-research/rayforce#7'), { repo: TEST_REPO, number: 7 });
+  assert.equal(channelId(ISSUE), 'github:anima-research/example-repo#7');
+  assert.deepEqual(parseChannelId('github:anima-research/example-repo#7'), { repo: TEST_REPO, number: 7 });
   assert.equal(parseChannelId('slack:C1'), null);
-  assert.equal(parseChannelId('github:rayforce#7'), null);
+  assert.equal(parseChannelId('github:example-repo#7'), null);
 
-  assert.equal(channelLabel(ISSUE, 'a short title'), 'anima-research/rayforce#7: a short title');
+  assert.equal(channelLabel(ISSUE, 'a short title'), 'anima-research/example-repo#7: a short title');
   const long = 'x'.repeat(200);
-  const prefix = 'anima-research/rayforce#7: ';
+  const prefix = 'anima-research/example-repo#7: ';
   const label = channelLabel(ISSUE, long);
   assert.ok(label.startsWith(`${prefix}xxxx`));
   assert.ok(label.includes('[truncated'));
@@ -328,8 +328,8 @@ test('channel and thread ids round-trip', () => {
 });
 
 test('the repo allow-list and its parsing', () => {
-  assert.deepEqual(parseRepoSlug('anima-research/rayforce'), TEST_REPO);
-  assert.equal(parseRepoSlug('rayforce'), null);
+  assert.deepEqual(parseRepoSlug('anima-research/example-repo'), TEST_REPO);
+  assert.equal(parseRepoSlug('example-repo'), null);
   assert.equal(repoAllowed(TEST_REPO, [TEST_REPO]), true);
   assert.equal(repoAllowed({ owner: 'other', name: 'repo' }, [TEST_REPO]), false);
 });

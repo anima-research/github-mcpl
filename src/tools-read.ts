@@ -1,6 +1,6 @@
 /**
  * github.read — the read tools, plus the argument, refusal, failure and
- * rendering support the write modules share (TASK-SRHKG.1.6).
+ * rendering support the write modules share.
  *
  * Tools: get_issue, get_pull_request, list_comments, list_review_threads,
  * list_pull_request_files, get_check_runs, search_issues. None of them writes

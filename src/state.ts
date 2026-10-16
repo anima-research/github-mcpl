@@ -1,5 +1,5 @@
 /**
- * Durable state and rollback bookkeeping (TASK-SRHKG.1.7).
+ * Durable state and rollback bookkeeping.
  *
  * The contract's state bullet, and SPEC 0.5 §8:
  *

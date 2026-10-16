@@ -1,5 +1,5 @@
 /**
- * `github.comments` — the rollback-capable write tools (TASK-SRHKG.1.7).
+ * `github.comments` — the rollback-capable write tools.
  *
  * The contract's feature-set bullet: `comment`, `reply_in_thread`,
  * `edit_own_comment`, `delete_own_comment`, `upsert_sticky_comment`. Every one

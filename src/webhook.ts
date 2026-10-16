@@ -1,5 +1,5 @@
 /**
- * Webhook ingress (TASK-SRHKG.1.3, §Ingress).
+ * Webhook ingress (§Ingress).
  *
  * A plain `node:http` server on GITHUB_WEBHOOK_PORT and GITHUB_WEBHOOK_PATH.
  * The order of the checks is the security property, so it is spelled out

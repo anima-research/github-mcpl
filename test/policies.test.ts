@@ -155,7 +155,7 @@ const humanOpenedPull: GateEventInfo = {
 const humanMention: GateEventInfo = {
   ...base,
   eventType: 'mcpl:channel-incoming',
-  content: '@rayforce-clone can you look at the tsan failure?',
+  content: '@example-agent can you look at the tsan failure?',
   tags: ['chat:mention', 'chat:from-human', 'github:actor=maintainer'],
   metadata: { mentioned: true, isOwnThread: false, fromSelf: false, repo: 'owner/repo', number: 12 },
 };
