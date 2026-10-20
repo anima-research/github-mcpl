@@ -12,7 +12,7 @@
     "created_at": "2026-10-13T17:41:00Z",
     "updated_at": "2026-10-13T17:49:12Z"
   },
-  "repository": { "id": 100200300, "name": "rayforce", "full_name": "anima-research/rayforce", "private": true, "owner": { "login": "anima-research", "id": 4001, "type": "Organization" }, "html_url": "https://github.com/anima-research/rayforce", "default_branch": "dev" },
+  "repository": { "id": 100200300, "name": "example-repo", "full_name": "anima-research/example-repo", "private": true, "owner": { "login": "anima-research", "id": 4001, "type": "Organization" }, "html_url": "https://github.com/anima-research/example-repo", "default_branch": "dev" },
   "sender": { "login": "octocat", "id": 1001, "type": "User" },
   "installation": { "id": 70000001 }
 }

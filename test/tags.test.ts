@@ -28,8 +28,8 @@ import {
   type GitHubTagContext,
 } from '../src/tags.js';
 
-const REPO: RepoRef = { owner: 'anima-research', name: 'rayforce' };
-const BOT = 'rayforce-clone[bot]';
+const REPO: RepoRef = { owner: 'anima-research', name: 'example-repo' };
+const BOT = 'example-agent[bot]';
 const ISSUE: ThreadRef = { repo: REPO, number: 7, kind: 'issue' };
 const PULL: ThreadRef = { repo: REPO, number: 12, kind: 'pull' };
 
@@ -47,7 +47,7 @@ function event(kind: NormalizedEventKind, over: Partial<NormalizedEvent> = {}): 
     kind,
     thread,
     actor: { login: 'alice', isBot: false },
-    html_url: 'https://github.com/anima-research/rayforce/issues/7#issuecomment-1',
+    html_url: 'https://github.com/anima-research/example-repo/issues/7#issuecomment-1',
     ...over,
   };
 }
@@ -235,7 +235,7 @@ test('a close, reopen, push or new commits never count the mention in a body the
   // The 2026-10-15 rehearsal: a polled issue.closed re-carried the issue's
   // body, and its old mention woke the bot that had just closed it.
   for (const kind of NORMALIZED_EVENT_KINDS) {
-    const { tags, metadata } = tagsFor(event(kind, { body: '@rayforce-clone please look' }), ctx());
+    const { tags, metadata } = tagsFor(event(kind, { body: '@example-agent please look' }), ctx());
     const counts = TEXT_KINDS.includes(kind);
     assert.equal(tags.includes('chat:mention'), counts, `${kind}: chat:mention`);
     assert.equal(metadata.mentioned, counts, `${kind}: metadata.mentioned`);
@@ -244,10 +244,10 @@ test('a close, reopen, push or new commits never count the mention in a body the
 
 test('chat:ambient never co-occurs with chat:mention or chat:reply, on any kind', () => {
   const addressing: Array<[string, Partial<GitHubTagContext>, Partial<NormalizedEvent>]> = [
-    ['mention', {}, { body: `@rayforce-clone please look` }],
+    ['mention', {}, { body: `@example-agent please look` }],
     ['own thread', { isOwnThread: true }, {}],
     ['reply to self', { isReplyToSelf: true }, {}],
-    ['mention and reply', { isOwnThread: true }, { body: `@rayforce-clone ping` }],
+    ['mention and reply', { isOwnThread: true }, { body: `@example-agent ping` }],
   ];
   for (const kind of NORMALIZED_EVENT_KINDS) {
     for (const [label, ctxOver, eventOver] of addressing) {
@@ -266,7 +266,7 @@ test('chat:ambient never co-occurs with chat:mention or chat:reply, on any kind'
 });
 
 test('chat:addressed is never emitted — the host expands it (RFC-001 §4.1)', () => {
-  const { tags } = tagsFor(event('comment.created', { body: '@rayforce-clone hi' }), ctx());
+  const { tags } = tagsFor(event('comment.created', { body: '@example-agent hi' }), ctx());
   assert.ok(!tags.includes('chat:addressed'));
   assert.ok(!EMITTED_TAGS.includes('chat:addressed'));
 });
@@ -281,7 +281,7 @@ test('chat:dm is never emitted', () => {
 test('exactly one sender tag, and from-self only for the bot login', () => {
   const senders: Array<[NormalizedEvent['actor'], string]> = [
     [{ login: BOT, isBot: true }, 'chat:from-self'],
-    [{ login: 'rayforce-clone', isBot: true }, 'chat:from-bot'],
+    [{ login: 'example-agent', isBot: true }, 'chat:from-bot'],
     [{ login: 'other-app[bot]', isBot: true }, 'chat:from-bot'],
     [{ login: 'alice', isBot: false }, 'chat:from-human'],
   ];
@@ -299,28 +299,28 @@ test('exactly one sender tag, and from-self only for the bot login', () => {
 
 test('mentionsBot accepts both spellings of an App login and rejects near misses', () => {
   const yes = [
-    '@rayforce-clone please look',
-    'cc @rayforce-clone[bot]',
-    'hey @RAYFORCE-CLONE',
-    'line\n@rayforce-clone\n',
-    '(@rayforce-clone)',
+    '@example-agent please look',
+    'cc @example-agent[bot]',
+    'hey @EXAMPLE-AGENT',
+    'line\n@example-agent\n',
+    '(@example-agent)',
   ];
   const no = [
-    'rayforce-clone please look',
-    'mail me at bob@rayforce-clone.example',
-    '@rayforce-clone-staging is a different app',
-    '@rayforce-cloneX',
-    'https://example.invalid/@rayforce-clone',
+    'example-agent please look',
+    'mail me at bob@example-agent.example',
+    '@example-agent-staging is a different app',
+    '@example-agentX',
+    'https://example.invalid/@example-agent',
     '',
   ];
   for (const body of yes) assert.ok(mentionsBot(body, BOT), JSON.stringify(body));
   for (const body of no) assert.ok(!mentionsBot(body, BOT), JSON.stringify(body));
   assert.ok(!mentionsBot(undefined, BOT));
-  assert.ok(!mentionsBot('@rayforce-clone', ''));
+  assert.ok(!mentionsBot('@example-agent', ''));
 });
 
 test('a mention is read from the body only, not the title', () => {
-  const titled = event('issue.opened', { title: '@rayforce-clone fix this', body: 'details' });
+  const titled = event('issue.opened', { title: '@example-agent fix this', body: 'details' });
   assert.ok(!tagsFor(titled, ctx()).metadata.mentioned);
 });
 
@@ -405,7 +405,7 @@ test('isReviewRequested is set for pull.review_requested and suppressible', () =
 test('metadata carries the scalar fields of the thread, actor and event', () => {
   const { metadata } = tagsFor(
     event('review_comment.created', {
-      body: '@rayforce-clone see https://example.invalid/x',
+      body: '@example-agent see https://example.invalid/x',
       sha: 'e'.repeat(40),
     }),
     ctx({ isOwnThread: true, isReplyToSelf: true, maintainers: ['alice'] }),
@@ -418,12 +418,12 @@ test('metadata carries the scalar fields of the thread, actor and event', () => 
     isCiFailure: false,
     fromSelf: false,
     isMaintainer: true,
-    repo: 'anima-research/rayforce',
+    repo: 'anima-research/example-repo',
     number: 12,
     kind: 'pull',
     actor: 'alice',
     sha: 'e'.repeat(40),
-    htmlUrl: 'https://github.com/anima-research/rayforce/issues/7#issuecomment-1',
+    htmlUrl: 'https://github.com/anima-research/example-repo/issues/7#issuecomment-1',
   });
 });
 

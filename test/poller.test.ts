@@ -1,5 +1,5 @@
 /**
- * Polling ingress (TASK-SRHKG.1.3, contract amendment 1).
+ * Polling ingress (contract amendment 1).
  *
  * The two acceptance properties are asserted directly:
  *
@@ -147,7 +147,7 @@ function failedSummary(sha: string): ChecksSummary {
     sha,
     conclusion: 'failure',
     total: 2,
-    failed: [{ name: 'clippy', url: 'https://github.com/anima-research/rayforce/runs/2700001235' }],
+    failed: [{ name: 'clippy', url: 'https://github.com/anima-research/example-repo/runs/2700001235' }],
   };
 }
 
@@ -234,7 +234,7 @@ test('every allow-listed repository is polled, in one pass', async () => {
   const result = await r.poller.pollOnce();
   assert.deepEqual(
     result.delivered.map((e) => [e.repo.name, e.thread?.number]),
-    [['rayforce', 41], ['chronicle', 3]],
+    [['example-repo', 41], ['chronicle', 3]],
   );
   assert.deepEqual(r.state.snapshot().pollKeys, ['issue:41:2026-10-13T12:00:00.000Z', 'issue:3:2026-10-13T12:00:01.000Z']);
 });
@@ -284,7 +284,7 @@ test('an open pull request whose head did not move is dropped on the next pass (
     first.delivered.map((e) => e.kind),
     ['pull.synchronize'],
   );
-  assert.equal(r.state.heads.get('github:anima-research/rayforce#58'), pull.head.sha);
+  assert.equal(r.state.heads.get('github:anima-research/example-repo#58'), pull.head.sha);
 
   // Pass two: a comment bumps the pull request's row without moving its head.
   // The comment is the event; re-announcing the pull request beside it is the
@@ -306,7 +306,7 @@ test('an open pull request whose head did not move is dropped on the next pass (
     ['pull.synchronize'],
   );
   assert.equal(third.delivered[0].sha, 'f'.repeat(40));
-  assert.equal(r.state.heads.get('github:anima-research/rayforce#58'), 'f'.repeat(40));
+  assert.equal(r.state.heads.get('github:anima-research/example-repo#58'), 'f'.repeat(40));
 });
 
 test('a pull request opened since the cursor is pull.opened, not synchronize (amendment 2a)', async () => {
@@ -348,7 +348,7 @@ test('a refused pull.synchronize is retried on the next pass and delivered once 
   // …and the head must be held back with it. Committing it here is what lost
   // the event for good: the next pass would compare the row against this very
   // sha, find no change, drop it, and let the cursor move past it.
-  assert.equal(r.state.heads.get('github:anima-research/rayforce#58'), undefined);
+  assert.equal(r.state.heads.get('github:anima-research/example-repo#58'), undefined);
 
   // Pass two: the same row is queried again (the cursor never moved) and the
   // host takes it this time.
@@ -364,7 +364,7 @@ test('a refused pull.synchronize is retried on the next pass and delivered once 
   assert.equal(second.failed, 0);
   assert.deepEqual(attempts, ['pull.synchronize', 'pull.synchronize'], 'attempted twice, delivered once');
   // Accepted, so now it is committed.
-  assert.equal(r.state.heads.get('github:anima-research/rayforce#58'), pull.head.sha);
+  assert.equal(r.state.heads.get('github:anima-research/example-repo#58'), pull.head.sha);
 
   // Pass three: nothing moved since, so the row is dropped as usual.
   pull.updatedAt = '2026-10-14T01:00:00.000Z';
@@ -388,7 +388,7 @@ test('a collection failure after a changed head does not advance the head (findi
   const r = rig({ api, cursor: '2026-10-13T09:00:00.000Z' });
   await assert.rejects(() => r.poller.pollOnce(), /502 on the comment page/);
   assert.equal(
-    r.state.heads.get('github:anima-research/rayforce#58'),
+    r.state.heads.get('github:anima-research/example-repo#58'),
     undefined,
     'a pass that delivered nothing advanced nothing',
   );
@@ -400,7 +400,7 @@ test('a collection failure after a changed head does not advance the head (findi
     recovered.delivered.map((e) => e.kind),
     ['pull.synchronize'],
   );
-  assert.equal(r.state.heads.get('github:anima-research/rayforce#58'), pull.head.sha);
+  assert.equal(r.state.heads.get('github:anima-research/example-repo#58'), pull.head.sha);
 });
 
 test('a dropped pull-request row still records its head, so the next pass agrees (amendment 2a)', async () => {
@@ -424,7 +424,7 @@ test('a dropped pull-request row still records its head, so the next pass agrees
       ['comment.created'],
     );
   }
-  assert.equal(r.state.heads.get('github:anima-research/rayforce#58'), pull.head.sha);
+  assert.equal(r.state.heads.get('github:anima-research/example-repo#58'), pull.head.sha);
 });
 
 test('issues, comments and review comments updated since the cursor are delivered oldest first', async () => {
@@ -484,7 +484,7 @@ test('an open pull-request head gets one checks event per conclusion, and none w
     sha: pull.head.sha,
     conclusion: 'failure',
     total: 2,
-    failed: [{ name: 'clippy', url: 'https://github.com/anima-research/rayforce/runs/2700001235' }],
+    failed: [{ name: 'clippy', url: 'https://github.com/anima-research/example-repo/runs/2700001235' }],
   });
 
   const r = rig({ api });
@@ -494,7 +494,7 @@ test('an open pull-request head gets one checks event per conclusion, and none w
   assert.equal(checks[0].sha, pull.head.sha);
   assert.deepEqual(checks[0].checks, {
     conclusion: 'failure',
-    failed: [{ name: 'clippy', url: 'https://github.com/anima-research/rayforce/runs/2700001235' }],
+    failed: [{ name: 'clippy', url: 'https://github.com/anima-research/example-repo/runs/2700001235' }],
   });
   assert.deepEqual(checks[0].thread, { repo: TEST_REPO, number: 58, kind: 'pull' });
   assert.deepEqual(api.callsTo('getCheckRuns')[0].args, [TEST_REPO, pull.head.sha]);
@@ -515,8 +515,8 @@ test('a settled head whose failed jobs change with the same count is news, not a
   const api = new FakeGitHubApi();
   const pull = api.seedPullRequest({ number: 58, updatedAt: '2026-10-13T12:00:00.000Z' });
   const sets = [
-    [{ name: 'lint', url: 'https://github.com/anima-research/rayforce/runs/1' }],
-    [{ name: 'test', url: 'https://github.com/anima-research/rayforce/runs/2' }],
+    [{ name: 'lint', url: 'https://github.com/anima-research/example-repo/runs/1' }],
+    [{ name: 'test', url: 'https://github.com/anima-research/example-repo/runs/2' }],
   ];
   const r = rig({
     api,

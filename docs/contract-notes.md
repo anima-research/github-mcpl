@@ -1,9 +1,9 @@
 # Contract notes
 
-TASK-SRHKG.1's Contract section is frozen; it does not, however, fix every
-type signature. This file records the decisions the .1 skeleton had to take so
-that .2 to .8 compile against one surface, and the places where a later work
-package may legitimately want to extend its own module instead.
+The original design contract is frozen; it does not, however, fix every
+type signature. This file records the decisions the shared types had to take so
+that every module compiles against one surface, and the places where a later
+change may legitimately want to extend its own module instead.
 
 One rule throughout: where the contract named something, the name is kept
 verbatim (`html_url`, `diffHunk`, `isResolved`), even where it mixes snake and
@@ -33,9 +33,9 @@ camel case, so a reviewer can map a contract bullet to a type by sight.
   `issues?state=all&sort=updated&since=`), `listIssueCommentsSince`
   (`issues/comments?sort=updated&since=`) and `listReviewCommentsSince`
   (`pulls/comments?sort=updated&since=`), returning `PolledIssue` /
-  `PolledComment` rows. The poller (.3) keeps the cursor `lastPollAt`, dedups
+  `PolledComment` rows. The poller keeps the cursor `lastPollAt`, dedups
   with the key `<kind>:<id>:<updated_at>` through `StateStore.seenPollKey`
-  (ring of `POLL_DEDUP_RING` = 2000 keys, .7), names poll events
+  (ring of `POLL_DEDUP_RING` = 2000 keys, in state.ts), names poll events
   `poll:<kind>:<id>:<updated_at>`, and asks `getCheckRuns` for the heads of
   the open PRs it saw, at most 20 per poll. These endpoints carry no
   `X-Poll-Interval`; `MIN_POLL_INTERVAL_MS` is the floor.
@@ -43,7 +43,7 @@ camel case, so a reviewer can map a contract bullet to a type by sight.
   cursor.** Amendment 1 left the polling ingress unable to tell an opened
   issue from an edited one, so every open issue row arrived as `issue.edited`
   and a recipe keyed on `github:issue=opened` could never fire on it (found by
-  the WP10 end-to-end run). A `since` query still carries no action, but it
+  the first end-to-end run). A `since` query still carries no action, but it
   does carry `created_at`, and that is enough: `PolledIssue` gains `createdAt`
   and `normalizePolledIssue(repo, row, receivedAt, since, previousHeadSha?)`
   derives the kind from it.
@@ -70,7 +70,7 @@ camel case, so a reviewer can map a contract bullet to a type by sight.
   endpoint models no reply relation at all — an issue comment has no
   `in_reply_to_id` — so `isReplyToSelf` could only ever be true for a *review*
   comment, and every human answer to a comment the bot had made on an issue
-  reached the host as plain `chat:ambient` (also found by the WP10 run). A
+  reached the host as plain `chat:ambient` (also found by the first end-to-end run). A
   review comment keeps the exact rule (`inReplyTo ∈ botReviewIds`); a
   top-level comment gets one derived rule:
 
@@ -130,34 +130,36 @@ The channel id is `github:<owner>/<name>#<number>` and carries no
 `issue | pull` discriminator (GitHub shares one number space between issues
 and PRs within a repository, so the number alone cannot tell them apart). So
 `parseChannelId` returns `ParsedChannelId { repo, number }` and the channel
-registry in .5 — which registered the channel and therefore knows its kind —
-supplies `kind` when it needs a full `ThreadRef`. `channelAddress(thread)`
-builds the descriptor address `{ owner, name, number, kind }` the contract
-names, from a `ThreadRef` that still has its kind.
+registry in channels.ts — which registered the channel and therefore knows its
+kind — supplies `kind` when it needs a full `ThreadRef`.
+`channelAddress(thread)` builds the descriptor address `{ owner, name, number,
+kind }` the contract names, from a `ThreadRef` that still has its kind.
 
 ## Types the contract implies but does not name
 
-- **`StateStore`** (types.ts) — `ToolContext` carries `state`, and .6 and .7
-  are built in parallel, so the state seam has to exist before .7 writes
-  `state.ts`. The interface is exactly the contract's state bullet: checkpoint
-  lineage, the comment ids created and the previous bodies of the comments
-  edited per checkpoint, the last poll time and the poll dedup ring
-  (amendment 1), plus an atomic `flush()`. `StateSnapshot` is the on-disk
-  JSON shape.
+- **`StateStore`** (types.ts) — `ToolContext` carries `state`, and the tools
+  and `state.ts` are built in parallel, so the state seam has to exist before
+  `state.ts` does. The interface is exactly the contract's state bullet:
+  checkpoint lineage, the comment ids created and the previous bodies of the
+  comments edited per checkpoint, the last poll time and the poll dedup ring
+  (amendment 1), plus an atomic `flush()`. `StateSnapshot` is the on-disk JSON
+  shape.
 - **`EventMetadata`, `TagResult`, `TagContext`** (types.ts) — the metadata
-  bullet enumerates the fields, and both .4 (which produces them) and .5
-  (which sends them on `channels/incoming`) need the same type. `TagContext`
-  carries what tags.ts cannot derive from the event alone: the bot login, the
-  maintainer list, and the two thread-history facts (`isOwnThread`,
+  bullet enumerates the fields, and both tags.ts (which produces them) and
+  channels.ts (which sends them on `channels/incoming`) need the same type.
+  `TagContext` carries what tags.ts cannot derive from the event alone: the bot
+  login, the maintainer list, and the two thread-history facts (`isOwnThread`,
   `isReplyToSelf`) that only the caller can know.
 - **`CORE_TAGS` and `GITHUB_TAGS`** (types.ts) — the tag vocabulary is
-  enumerated in the contract and is needed by .4 (emission) and .6 (the
-  `tagOntology` of the declarations). Keeping the two lists in types.ts is
-  what stops them from drifting apart in two files owned by two packages.
+  enumerated in the contract and is needed by tags.ts (emission) and
+  feature-sets.ts (the `tagOntology` of the declarations). Keeping the two
+  lists in types.ts is what stops them from drifting apart in two files owned
+  by two packages.
 - **`LIMITS` and `bounded()`** (types.ts) — the contract's bounds (comments 4k
-  chars, lists 50 entries, titles 80 chars) as one constant, so .4, .5 and .6
-  cannot each pick their own. `channelLabel()` is in types.ts for the same
-  reason: it is the contract's label format and its 80-char bound.
+  chars, lists 50 entries, titles 80 chars) as one constant, so rendering,
+  channels and the tools cannot each pick their own. `channelLabel()` is in
+  types.ts for the same reason: it is the contract's label format and its
+  80-char bound.
 - **`errors.ts`** — not in the module map, but `grant.ts` is a copy of
   slack-mcpl's and that file imports `McplRpcError`. It is slack-mcpl's
   `errors.ts` verbatim (protocol-generic).
@@ -165,7 +167,7 @@ names, from a `ThreadRef` that still has its kind.
   "api, state, bot login, repo allow-list, logger", but `github.pr` has to
   check a PR base against `GITHUB_PR_BASE_ALLOW`, and a tool cannot reach the
   environment. The allow-list is the sixth field rather than a second,
-  divergent way for .6 to find it.
+  divergent way for the tools to find it.
 - **`GITHUB_API_METHODS`** — the method-name list, so the harness can assert
   `FakeGitHubApi` covers all of them (`as const satisfies readonly (keyof
   GitHubApi)[]`: adding a method to the interface without the constant is a
@@ -205,25 +207,26 @@ The contract names the variables but not every default or requiredness.
   property (without it the server can answer itself), so it is not something
   to default.
 
-## Not materialized by .1
+## Not materialized by the first skeleton
 
-> Historical, and all of it has since landed: .2 to .8 wrote the modules and
-> .9 wired them, so `server.ts` and `index.ts` are the real server and the
+> Historical, and all of it has since landed: the modules are written and
+> wired together, so `server.ts` and `index.ts` are the real server and the
 > real entry point, `feature-sets.ts` exists and `octokit` is used by the
 > adapter. The list is kept because the *reasons* below are still the reasons
 > the seams are shaped as they are. The one item still open is the
 > `changelog.d` fold.
 
-- `octokit` is a declared dependency but is imported nowhere yet; .2 is the
-  first and only user.
+- `octokit` is a declared dependency but is imported nowhere yet;
+  `github-adapter.ts` is the first and only user.
 - `server.ts` and `index.ts` are stubs. `serve()` answers every request with
   `-32601` so a host and the harness can attach and detach; there is no
   handshake, no manifest, no routing. `index.ts` validates the environment and
   starts the stub with a `GitHubApi` proxy that throws if touched.
 - No `feature-sets.ts`: `CapabilityGrant` takes its declarations through the
-  constructor (as slack-mcpl's does), so .6 can write that file without
-  touching `grant.ts`. `TOOLS_BY_FEATURE_SET`, `ROLLBACK_CAPABLE` and
-  `featureSetForTool()` in types.ts are what .6 builds its declarations from.
+  constructor (as slack-mcpl's does), so `feature-sets.ts` can be written
+  without touching `grant.ts`. `TOOLS_BY_FEATURE_SET`, `ROLLBACK_CAPABLE` and
+  `featureSetForTool()` in types.ts are what `feature-sets.ts` builds its
+  declarations from.
 - The `changelog.d` fold (`scripts/release-changelog.mjs` and the `version`
   npm script) is not copied: the package scripts are the five the task names
   (build, typecheck, test, start, clean). Fragments accumulate until the first

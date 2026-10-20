@@ -18,11 +18,13 @@ or several of one owner; one process per owner.
   rollback deletes the comments created after the checkpoint and restores the
   bodies of the ones edited after it. Nothing GitHub cannot undo is
   checkpointed, and nothing is granted that the host did not grant.
-- **No merge, ever.** Not in v1, not behind a flag. The base branch of any
-  pull request the server opens or retargets is checked against an allow-list.
+- **No merge, ever.** There is no merge tool to enable, and no flag that
+  adds one. The base branch of any pull request the server opens or
+  retargets is checked against an allow-list.
 
-Built on [`@animalabs/mcpl-core`](../mcpl-core-ts); sibling of
-[slack-mcpl](../slack-mcpl) and [telegram-mcpl](../telegram-mcpl).
+Built on [`@animalabs/mcpl-core`](https://github.com/anima-research/mcpl-core-ts);
+sibling of [slack-mcpl](https://github.com/anima-research/slack-mcpl) and
+[telegram-mcpl](https://github.com/anima-research/telegram-mcpl).
 
 > **Status: v1, run end to end against a live GitHub App.** The server answers a
 > host's handshake in MCPL or in plain MCP, applies the grant it is given
@@ -89,9 +91,9 @@ open it in a browser, paste `app-manifest.json` into the field and submit.
 </form>
 ```
 
-Name it on the GitHub page that follows: `rayforce-clone` is the proposal for
-the maintainer's clone. The name becomes the bot login with `[bot]` appended
-(`rayforce-clone[bot]`), which is what `GITHUB_BOT_LOGIN` must hold.
+Name it on the GitHub page that follows. The name becomes the bot login with
+`[bot]` appended (an App named `my-github-agent` posts as
+`my-github-agent[bot]`), which is what `GITHUB_BOT_LOGIN` must hold.
 
 **b. Catch the code.** GitHub creates the App and redirects your browser to
 the manifest's `redirect_url` with `?code=…` — a temporary code, good for one
@@ -240,9 +242,9 @@ told where Node is instead of looking.
 | `GITHUB_WEBHOOK_PATH` | no | `/github/webhook` | Path the listener answers on. |
 | `GITHUB_POLL_INTERVAL_MS` | no | `0` (off) | Polling fallback: issues and PRs, issue comments and review comments updated since the cursor, plus the checks on the heads of the open PRs seen. `0` is off; a non-zero value below `60000` is refused. Partial — it cannot see a submitted review, a review request or a push ([what polling misses](docs/deploy.md#option-3--polling-only-no-webhook-at-all)) — and it is not meant to run alongside the webhook. |
 | `GITHUB_REPOS` | yes | — | Comma-separated `owner/name` allow-list; a write anywhere else is refused by name. Several entries must share one owner (one App installation, one token); a second owner is a second server process. With several, every tool call names its repository. |
-| `GITHUB_PR_BASE_ALLOW` | no | empty = no PR target allowed | Branches a pull request may target or be retargeted to. A plain `branch` applies to every repository, `owner/name:branch` to that one: `anima-research/rayforce:dev,main`. |
+| `GITHUB_PR_BASE_ALLOW` | no | empty = no PR target allowed | Branches a pull request may target or be retargeted to. A plain `branch` applies to every repository, `owner/name:branch` to that one: `my-org/app:dev,main`. |
 | `GITHUB_STATE_FILE` | no | unset = in-memory only | Durable JSON: checkpoint lineage, rollback bookkeeping, the poll cursor. |
-| `GITHUB_BOT_LOGIN` | yes | — | The App's bot login, e.g. `rayforce-clone[bot]`. From-self and mention detection depend on it. |
+| `GITHUB_BOT_LOGIN` | yes | — | The App's bot login, e.g. `my-github-agent[bot]`. From-self and mention detection depend on it. |
 | `GITHUB_MAINTAINERS` | no | empty | Comma-separated logins marked `isMaintainer` in metadata and tagged `github:actor=maintainer`. |
 
 ### 8. Build and run it
@@ -276,10 +278,12 @@ only, who can read the key, and log hygiene, continue in
 
 ### Wake policies are not optional
 
-A rayforce-sized repository produces 60–115 events a day, and one wake costs
-roughly 100k input tokens. A policy set that wakes on everything is about
-10M tokens a day of ambient chatter. Both example recipes therefore skip by
-default and wake only on what is addressed to the agent:
+A repository as busy as the one this connector was first built for produces
+60–115 events a day (pushes, reviews, inline comments, comments, pull
+requests, issues), and one wake costs roughly 100k input tokens. A policy set
+that wakes on everything is about 10M tokens a day of ambient chatter. Both
+example recipes therefore skip by default and wake only on what is addressed
+to the agent:
 
 **The order is the design**, because the host matches first-rule-wins and
 `metadataTrue` is an OR-list: one rule that wakes on `isOwnThread` placed
@@ -297,7 +301,7 @@ exception next, and the wake rules last:
 | 6 | `github-new-work` (maintainer clone only) | `github:issue=opened`, `github:pr=opened` | `debounce: 60000` — one wake once the burst settles |
 | 7 | `github-ambient` | anything else from `github` | `skip`, and `default` is `skip` too |
 
-`test/wp8-policies.test.ts` runs both recipes through connectome-host's own
+`test/policies.test.ts` runs both recipes through connectome-host's own
 `EventGate` matcher and asserts that ordering: a green build on the agent's
 own pull request is skipped, a broken one wakes it, a bot's pull request
 neither wakes nor debounces, a human mention wakes it, and no rule is left
@@ -340,8 +344,8 @@ Notes worth knowing before you grant them:
 
 - `upsert_sticky_comment(thread, marker, body)` finds the agent's own comment
   containing an HTML marker and edits it in place, else creates it. One
-  running status comment instead of a tail of them — the same thing
-  `rayforce-audit` does with `<!-- rayforce-audit-failure-comment -->`.
+  running status comment instead of a tail of them, the pattern CI bots use
+  with a marker such as `<!-- my-github-agent-status -->`.
 - `create_pull_request` and a base change in `edit_pull_request` refuse a base
   outside `GITHUB_PR_BASE_ALLOW`. Empty means no pull request may be opened.
 - `github.pr` has no merge tool and no branch deletion. There is nothing to
@@ -353,7 +357,7 @@ Notes worth knowing before you grant them:
 
 Every event carries RFC-001 core tags, the `github:` namespace, and a flat
 metadata record the host matches `metadataTrue` against. The per-event detail
-lands in `docs/events.md` with work package .4; the vocabulary itself is the
+is in [`docs/events.md`](docs/events.md); the vocabulary itself is the
 contract and is listed here in full.
 
 **Core tags** (producer `github`):
@@ -388,7 +392,7 @@ contract and is listed here in full.
 | --- | --- |
 | `mentioned` | the body mentions the bot |
 | `isOwnThread` | the bot authored the thread or has commented in it |
-| `isReplyToSelf` | the event replies to a comment the bot wrote: a **review** comment whose `in_reply_to_id` is one of the bot's, or a **top-level** comment that immediately follows one of the bot's on the thread (amendment 2b, turn order). Quoting the bot's text does not count in v1 — see `docs/contract-notes.md`. |
+| `isReplyToSelf` | the event replies to a comment the bot wrote: a **review** comment whose `in_reply_to_id` is one of the bot's, or a **top-level** comment that immediately follows one of the bot's on the thread (turn order). Quoting the bot's text does not count in v1 — see `docs/contract-notes.md`. |
 | `isReviewRequested` | the bot was asked for a review |
 | `isCiFailure` | a check suite on this thread's head failed |
 | `fromSelf` | the bot itself acted (**skip this first in every policy set**) |
@@ -420,8 +424,9 @@ reach metadata and never reach the model.
   one agent, one context and one prompt, so keep them to repositories whose
   rules the prompt can state together.
 - **A base allow-list.** `GITHUB_PR_BASE_ALLOW` is empty by default, which
-  means no pull request may be opened or retargeted at all. For rayforce it is
-  `dev`, so the release branch is unreachable even by mistake.
+  means no pull request may be opened or retargeted at all. Name only the
+  integration branch (say `dev`) and the release branch is unreachable even
+  by mistake.
 - **No merge.** No tool merges, closes a release branch or deletes a branch.
 - **Bodies from strangers are data, not instructions.** An issue body, a
   comment, a review and a check's output are text written by other people,
@@ -465,20 +470,20 @@ Node 22, ESM, TypeScript. Stdout carries only JSON-RPC: every diagnostic goes
 through the `Logger`, which writes to stderr. No test in this package reaches
 the network.
 
-| File | Work package | Role |
-| --- | --- | --- |
-| `types.ts` | .1 | Every shared type and constant, the channel and thread id helpers, `readConfig`, `Logger`. Read by all, edited by nobody else. |
-| `grant.ts`, `errors.ts` | .1 | Capability-grant state, `uses` validation, the §6.7 degradation receipt, the §6.6 error codes. |
-| `github-adapter.ts` | .2 | `GitHubAdapter implements GitHubApi` over octokit: App auth, installation-token refresh, rate-limit backoff. The only file that knows octokit exists. |
-| `webhook.ts`, `poller.ts` | .3 | Ingress: signature-checked deliveries and repository since-polls become `NormalizedEvent`s; dedup; allow-list. |
-| `tags.ts`, `content.ts` | .4 | Pure functions: `tagsFor`, `renderEvent`, `renderThread`, `renderPullRequestSummary`, `renderChecks`, all bounded by `LIMITS`. |
-| `channels.ts` | .5 | Channel registry and descriptors, lazy registration, `channels/incoming`, `channels/publish`, typing as a no-op. |
-| `feature-sets.ts`, `tools-*.ts` | .6 | Feature-set declarations and the read, issues, pr and review tools. |
-| `tools-comments.ts`, `state.ts` | .7 | Comment tools including the sticky upsert; checkpoint lineage and rollback. |
-| `server.ts`, `index.ts` | .9 | Handshake, `featureSets/update`, tool routing, the event pipeline, plain-MCP mode. |
+| File | Role |
+| --- | --- |
+| `types.ts` | Every shared type and constant, the channel and thread id helpers, `readConfig`, `Logger`. Read by all, edited by nobody else. |
+| `grant.ts`, `errors.ts` | Capability-grant state, `uses` validation, the §6.7 degradation receipt, the §6.6 error codes. |
+| `github-adapter.ts` | `GitHubAdapter implements GitHubApi` over octokit: App auth, installation-token refresh, rate-limit backoff. The only file that knows octokit exists. |
+| `webhook.ts`, `poller.ts` | Ingress: signature-checked deliveries and repository since-polls become `NormalizedEvent`s; dedup; allow-list. |
+| `tags.ts`, `content.ts` | Pure functions: `tagsFor`, `renderEvent`, `renderThread`, `renderPullRequestSummary`, `renderChecks`, all bounded by `LIMITS`. |
+| `channels.ts` | Channel registry and descriptors, lazy registration, `channels/incoming`, `channels/publish`, typing as a no-op. |
+| `feature-sets.ts`, `tools-*.ts` | Feature-set declarations and the read, issues, pr and review tools. |
+| `tools-comments.ts`, `state.ts` | Comment tools including the sticky upsert; checkpoint lineage and rollback. |
+| `server.ts`, `index.ts` | Handshake, `featureSets/update`, tool routing, the event pipeline, plain-MCP mode. |
 
 Changelog entries land as fragments in [`changelog.d/`](changelog.d/README.md).
-Contract decisions taken where TASK-SRHKG.1's contract left a type
+Design decisions taken where the original contract left a type
 under-specified are in [`docs/contract-notes.md`](docs/contract-notes.md). A
 target repository's own operating notes — branch model, commit style, CI
 gates, review rounds, issue style — belong with the host's deployment, beside

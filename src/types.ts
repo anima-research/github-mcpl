@@ -1,9 +1,9 @@
 /**
- * Shared contract for github-mcpl (TASK-SRHKG.1, section Contract).
+ * Shared contract for github-mcpl.
  *
  * Every other module in the map reads this file and none of them edits it, so
- * the work packages .2 to .8 can be built in parallel against one import
- * surface. The ordering below follows the contract's own bullets:
+ * the modules can be built in parallel against one import surface. The
+ * ordering below follows the contract's own bullets:
  *
  *   1. Repository refs and thread refs
  *   2. Normalized events (the ingress → pipeline currency)
@@ -26,7 +26,7 @@ import type { ContentBlock } from '@animalabs/mcpl-core';
 // 1. Repositories and threads
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** A repository in the allow-list, e.g. `{ owner: 'anima-research', name: 'rayforce' }`. */
+/** A repository in the allow-list, e.g. `{ owner: 'my-org', name: 'my-repo' }`. */
 export interface RepoRef {
   owner: string;
   name: string;

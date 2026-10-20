@@ -1,5 +1,5 @@
 {
-  "name": "rayforce-clone",
+  "name": "my-github-agent",
   "description": "An agent living in one GitHub repository: it wakes on issues, comments, pull requests, reviews and check results, and answers in the thread it was spoken to in. Runs as github-mcpl, an MCPL connector. No merge, no release-branch write.",
   "url": "https://example.com/github-mcpl",
   "public": false,

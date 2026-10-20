@@ -1,8 +1,8 @@
 /**
- * WP8 operator surface: the manifest, the recipes and the deploy files are
+ * The operator surface: the manifest, the recipes and the deploy files are
  * data a reader follows literally, so they are checked like code.
  *
- * Three things this proves, one per acceptance criterion of TASK-SRHKG.1.8:
+ * Three things this proves, one per acceptance criterion of the operator surface:
  *   1. app-manifest.json carries GitHub's manifest fields, exactly the five
  *      permissions the tools need, and no OAuth user flow.
  *   2. Both example recipes parse, and every wake policy references only
@@ -202,8 +202,8 @@ test('the operator surface carries no secret material', () => {
     'deploy/github-mcpl',
     'deploy/capture-manifest-code.mjs',
     // The tests too: a fixture is the classic place a real key gets pasted.
-    'test/wp8-docs.test.ts',
-    'test/wp8-policies.test.ts',
+    'test/docs.test.ts',
+    'test/policies.test.ts',
     ...RECIPES,
   ];
   // Private keys, GitHub token forms, and an installation id pasted into a URL.
@@ -256,7 +256,7 @@ const modeOf = (path: string): string => (statSync(path).mode & 0o777).toString(
 
 /** A temp home with ~/.config/github-mcpl as README step 2 leaves it. */
 function freshHome(): { home: string; cfg: string } {
-  const home = mkdtempSync(join(tmpdir(), 'wp8-home-'));
+  const home = mkdtempSync(join(tmpdir(), 'docs-home-'));
   const cfg = join(home, '.config/github-mcpl');
   mkdirSync(cfg, { recursive: true, mode: 0o700 });
   return { home, cfg };
@@ -334,7 +334,7 @@ test('README: the credential split creates both files at mode 600', () => {
     const fixture = join(home, 'conversion-fixture.json');
     writeFileSync(fixture, JSON.stringify({
       id: 987654,
-      slug: 'rayforce-clone',
+      slug: 'example-agent',
       pem,
       webhook_secret: 'not-a-real-secret',
       client_id: 'Iv1.unused',
@@ -355,7 +355,7 @@ test('README: the credential split creates both files at mode 600', () => {
     assert.equal(modeOf(join(cfg, 'webhook-secret')), '600');
     assert.ok(!existsSync(join(cfg, 'conversion.json')), 'the response is deleted, key and all');
     assert.match(stdout, /^GITHUB_APP_ID=987654$/m);
-    assert.match(stdout, /^GITHUB_BOT_LOGIN=rayforce-clone\[bot\]$/m);
+    assert.match(stdout, /^GITHUB_BOT_LOGIN=example-agent\[bot\]$/m);
     assert.doesNotMatch(stdout, /PLACEHOLDER|not-a-real-secret/, 'no secret is printed to a terminal');
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -466,7 +466,7 @@ test('README: the checkout exists before a step runs something out of it', () =>
 });
 
 test('README: an empty host reaches the registration script by following step 1', () => {
-  const home = mkdtempSync(join(tmpdir(), 'wp8-host-'));
+  const home = mkdtempSync(join(tmpdir(), 'docs-host-'));
   try {
     const step1 = setupBlocks().find((b) => /git clone/.test(b));
     assert.ok(step1, 'step 1 clones');

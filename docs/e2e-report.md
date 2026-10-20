@@ -1,7 +1,8 @@
-# WP10 — end to end on the sandbox
+# End to end on a sandbox repository
 
-TASK-SRHKG.1.10. This connector against real GitHub: round 1, the review that
-failed it, and the eight fix rounds that closed it.
+This connector against real GitHub, before its first release: round 1, the
+review that failed it, and the eight fix rounds that closed it; then the
+webhook round, a soak across a token expiry and a Linux install.
 
 | | |
 | --- | --- |
@@ -558,7 +559,7 @@ two threads, sticky edit-in-place, rollback ordering and the restore of an
 edit, one `checks.completed` per head sha, the base allow-list on both create
 and edit, and the dedup ring surviving a restart.
 
-## Open items for the maintainer's installation
+## Open items for a production installation
 
 - **O1 — closed by round 3 below** (webhook over a tunnel, 2026-10-14 21:17Z–21:31Z). As it stood after round 2: the webhook path is entirely unexercised against real GitHub. No
   tunnel was available, so `GITHUB_WEBHOOK_SECRET` and the webhook port were
@@ -692,8 +693,7 @@ reviewers' evidence directories was copied into the tree.
 
 ## Gates
 
-Run through `orgasmic dispatch gate` in the `repos/github-mcpl` checkout, at
-the final sha on a clean tree:
+Run in the checkout at the final sha on a clean tree:
 
 | Gate | Command | Result |
 | --- | --- | --- |
@@ -766,7 +766,7 @@ deliberately unsigned probes it rejected with 401; 1 replay dropped.
    21:21:40Z while `.75` and `.198` answered in 0.3 s; from 21:22Z all three
    answered. GitHub does not retry a timed-out delivery on its own, so each
    stall is a lost event unless someone redelivers it. The 34 deliveries after
-   21:22Z all got 202. For the maintainer's installation this argues for a host
+   21:22Z all got 202. For a production installation this argues for a host
    with a stable public address (deploy option 1) or Cloudflare (option 2)
    rather than Funnel from a laptop, and for the polling fallback as the safety
    net when the webhook is the only ingress.
