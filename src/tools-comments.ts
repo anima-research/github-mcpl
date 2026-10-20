@@ -8,7 +8,7 @@
  * {@link rollbackComments} can undo it after a restart as well as before one.
  *
  * Two arguments the contract names but does not shape, decided here and
- * reported for .9 to reconcile:
+ * reported for tool-support.ts to reconcile:
  *
  *   - **`thread`** accepts `{ owner?, name?, number, kind? }` or the string
  *     forms `owner/name#12`, `github:owner/name#12`, `#12`, `12`. Owner and
@@ -24,8 +24,8 @@
  *     `review` names the endpoint; omitted, an id that exists on both is
  *     refused rather than guessed at.
  *
- * Tool results are plain text blocks bounded by {@link LIMITS}; .4's
- * `content.ts` does not exist on `main` yet, so nothing here imports it.
+ * Tool results are plain text blocks bounded by {@link LIMITS}; nothing here
+ * imports `content.ts`, which renders events rather than tool results.
  */
 
 import {

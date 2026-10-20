@@ -24,20 +24,21 @@
  *     thread as the bot's own when it authored anything there.
  *   - **Channels.** `channels/list`, `channels/open`, `channels/close`,
  *     `channels/publish` (as a Request *or* a Notification, §14.3) and
- *     `channels/typing` over the `ChannelRegistry` of .5, each behind its own
- *     capability, and all of them behind GITHUB_REPOS: a channel is a write
- *     surface, so the allow-list that binds the tools binds it too.
- *   - **State.** `state/rollback` through `rollbackComments` (.7); an unknown
- *     or abandoned checkpoint arrives here as a thrown `McplRpcError` and
- *     leaves as the JSON-RPC error `-32005` (§8.7).
- *   - **The pipeline.** One `onEvent` for both ingress paths (.3):
- *     `tagsFor` (.4) → `renderEvent` (.4) → `channels/incoming` (.5) *and*
- *     `push/event`. The two egress paths are granted separately, so a host
- *     with no channels still wakes and a host with no push still reads its
- *     channels; only an event with a thread can be a channel delivery. Each
- *     path is re-asked immediately before its own send ({@link
- *     GitHubMcplServer.eventEgressAllowed}), so a reduction the host
- *     acknowledged while the event was in flight stops it.
+ *     `channels/typing` over the `ChannelRegistry` of channels.ts, each behind
+ *     its own capability, and all of them behind GITHUB_REPOS: a channel is a
+ *     write surface, so the allow-list that binds the tools binds it too.
+ *   - **State.** `state/rollback` through `rollbackComments`
+ *     (tools-comments.ts); an unknown or abandoned checkpoint arrives here as
+ *     a thrown `McplRpcError` and leaves as the JSON-RPC error `-32005`
+ *     (§8.7).
+ *   - **The pipeline.** One `onEvent` for both ingress paths (webhook.ts,
+ *     poller.ts): `tagsFor` (tags.ts) → `renderEvent` (content.ts) →
+ *     `channels/incoming` (channels.ts) *and* `push/event`. The two egress
+ *     paths are granted separately, so a host with no channels still wakes and
+ *     a host with no push still reads its channels; only an event with a
+ *     thread can be a channel delivery. Each path is re-asked immediately
+ *     before its own send ({@link GitHubMcplServer.eventEgressAllowed}), so a
+ *     reduction the host acknowledged while the event was in flight stops it.
  *
  * Stdout is the JSON-RPC channel: every diagnostic goes through the Logger,
  * which writes to stderr only.

@@ -2,18 +2,17 @@
  * Tool support — the arguments, refusals, failures and per-field bounds every
  * ToolModule shares (moved out of tools-read.ts).
  *
- * .6 put these in `tools-read.ts` because its write scope was those four files
- * and both write modules needed them; .7 then grew its own thread parser in
- * `tools-comments.ts` because the two packages were built in parallel. WP9
- * reconciles both: the helpers live here, and {@link parseThread} is the one
- * parser for every form of "which issue or pull request" — `owner/name#12`,
- * `github:owner/name#12`, `#12`, `12`, and `{ owner, name, number, kind }`.
+ * These first lived in `tools-read.ts`, which both write modules needed, and
+ * `tools-comments.ts` grew its own thread parser while the two were built in
+ * parallel. This file reconciles both: the helpers live here, and
+ * {@link parseThread} is the one parser for every form of "which issue or
+ * pull request" — `owner/name#12`, `github:owner/name#12`, `#12`, `12`, and
+ * `{ owner, name, number, kind }`.
  *
  * The render* functions stay where they are. `content.ts` renders an *event*
  * for a channel delivery; these tools render a *result* for the model, and
- * only .6's renderers bound the fields the contract's `LIMITS` does not name
- * (a login, a branch, a sha, a node id, a path, a URL, an echoed query). See
- * the WP9 report for that decision.
+ * only the tool renderers bound the fields the contract's `LIMITS` does not
+ * name (a login, a branch, a sha, a node id, a path, a URL, an echoed query).
  */
 
 import {

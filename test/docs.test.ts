@@ -1,5 +1,5 @@
 /**
- * WP8 operator surface: the manifest, the recipes and the deploy files are
+ * The operator surface: the manifest, the recipes and the deploy files are
  * data a reader follows literally, so they are checked like code.
  *
  * Three things this proves, one per acceptance criterion of the operator surface:

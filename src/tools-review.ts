@@ -54,7 +54,7 @@ const DIFF_SIDES: readonly DiffSide[] = ['LEFT', 'RIGHT'];
 /** A verdict on code is only a verdict when someone else wrote it. */
 const VERDICT_EVENTS: readonly ReviewEvent[] = ['APPROVE', 'REQUEST_CHANGES'];
 
-/** GitHub logins are case-insensitive; `My-Agent[bot]` and `my-agent[bot]` are one login. */
+/** GitHub logins are case-insensitive; `My-GitHub-Agent[bot]` and `my-github-agent[bot]` are one login. */
 function sameLogin(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }

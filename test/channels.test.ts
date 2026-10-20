@@ -7,9 +7,8 @@
  *   - the host, over a `McplConnection` pair, so every descriptor and every
  *     incoming message is actually serialized to JSON-RPC and parsed back on
  *     the host side before it is asserted on (the same fake-host wiring
- *     test/harness.ts uses, kept here because the .1 skeleton's server does
- *     not route channel methods yet — .9 does that, and `harness()` then
- *     drives this module through the server);
+ *     test/harness.ts uses, kept here so this module is tested on its own;
+ *     `harness()` drives it through the server);
  *   - GitHub, through the harness's {@link FakeGitHubApi}: no network, and the
  *     call log is what publish routing is asserted against.
  */
