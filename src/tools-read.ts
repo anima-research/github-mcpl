@@ -8,7 +8,7 @@
  *
  * The shared argument helpers, the allow-list check and the failure formatting
  * (`runTool`, `ToolRefusal`, `resolveRepo`, the one `parseThread`) moved to
- * `tool-support.ts` in WP9; every tool module imports them from there.
+ * `tool-support.ts`; every tool module imports them from there.
  *
  * The bounded renderer below stays. `content.ts` renders an *event* for a
  * channel delivery; these functions render a *result* for the model, and only

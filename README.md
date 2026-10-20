@@ -92,8 +92,8 @@ open it in a browser, paste `app-manifest.json` into the field and submit.
 ```
 
 Name it on the GitHub page that follows. The name becomes the bot login with
-`[bot]` appended (an App named `my-agent` posts as `my-agent[bot]`), which is
-what `GITHUB_BOT_LOGIN` must hold.
+`[bot]` appended (an App named `my-github-agent` posts as
+`my-github-agent[bot]`), which is what `GITHUB_BOT_LOGIN` must hold.
 
 **b. Catch the code.** GitHub creates the App and redirects your browser to
 the manifest's `redirect_url` with `?code=…` — a temporary code, good for one
@@ -244,7 +244,7 @@ told where Node is instead of looking.
 | `GITHUB_REPOS` | yes | — | Comma-separated `owner/name` allow-list; a write anywhere else is refused by name. Several entries must share one owner (one App installation, one token); a second owner is a second server process. With several, every tool call names its repository. |
 | `GITHUB_PR_BASE_ALLOW` | no | empty = no PR target allowed | Branches a pull request may target or be retargeted to. A plain `branch` applies to every repository, `owner/name:branch` to that one: `my-org/app:dev,main`. |
 | `GITHUB_STATE_FILE` | no | unset = in-memory only | Durable JSON: checkpoint lineage, rollback bookkeeping, the poll cursor. |
-| `GITHUB_BOT_LOGIN` | yes | — | The App's bot login, e.g. `my-agent[bot]`. From-self and mention detection depend on it. |
+| `GITHUB_BOT_LOGIN` | yes | — | The App's bot login, e.g. `my-github-agent[bot]`. From-self and mention detection depend on it. |
 | `GITHUB_MAINTAINERS` | no | empty | Comma-separated logins marked `isMaintainer` in metadata and tagged `github:actor=maintainer`. |
 
 ### 8. Build and run it
@@ -278,11 +278,12 @@ only, who can read the key, and log hygiene, continue in
 
 ### Wake policies are not optional
 
-An active repository easily produces 60–115 events a day (pushes, reviews,
-inline comments, comments, pull requests, issues), and one wake costs
-roughly 100k input tokens. A policy set that wakes on everything is about
-10M tokens a day of ambient chatter. Both example recipes therefore skip by
-default and wake only on what is addressed to the agent:
+A repository as busy as the one this connector was first built for produces
+60–115 events a day (pushes, reviews, inline comments, comments, pull
+requests, issues), and one wake costs roughly 100k input tokens. A policy set
+that wakes on everything is about 10M tokens a day of ambient chatter. Both
+example recipes therefore skip by default and wake only on what is addressed
+to the agent:
 
 **The order is the design**, because the host matches first-rule-wins and
 `metadataTrue` is an OR-list: one rule that wakes on `isOwnThread` placed
@@ -344,7 +345,7 @@ Notes worth knowing before you grant them:
 - `upsert_sticky_comment(thread, marker, body)` finds the agent's own comment
   containing an HTML marker and edits it in place, else creates it. One
   running status comment instead of a tail of them, the pattern CI bots use
-  with a marker such as `<!-- my-agent-status -->`.
+  with a marker such as `<!-- my-github-agent-status -->`.
 - `create_pull_request` and a base change in `edit_pull_request` refuse a base
   outside `GITHUB_PR_BASE_ALLOW`. Empty means no pull request may be opened.
 - `github.pr` has no merge tool and no branch deletion. There is nothing to
@@ -391,7 +392,7 @@ contract and is listed here in full.
 | --- | --- |
 | `mentioned` | the body mentions the bot |
 | `isOwnThread` | the bot authored the thread or has commented in it |
-| `isReplyToSelf` | the event replies to a comment the bot wrote: a **review** comment whose `in_reply_to_id` is one of the bot's, or a **top-level** comment that immediately follows one of the bot's on the thread (turn order). Quoting the bot's text does not count — see `docs/contract-notes.md`. |
+| `isReplyToSelf` | the event replies to a comment the bot wrote: a **review** comment whose `in_reply_to_id` is one of the bot's, or a **top-level** comment that immediately follows one of the bot's on the thread (turn order). Quoting the bot's text does not count in v1 — see `docs/contract-notes.md`. |
 | `isReviewRequested` | the bot was asked for a review |
 | `isCiFailure` | a check suite on this thread's head failed |
 | `fromSelf` | the bot itself acted (**skip this first in every policy set**) |
