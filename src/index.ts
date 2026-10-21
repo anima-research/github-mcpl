@@ -143,7 +143,7 @@ async function shutdown(running: Running, log: Logger): Promise<void> {
     log.warn('webhook did not close', { error: String(err) });
   }
   try {
-    // Last: the poll cursor and the checkpoint lineage must survive the exit.
+    // Last: the poll cursors and the checkpoint lineage must survive the exit.
     await running.state.flush();
   } catch (err) {
     log.error('state flush failed', { error: String(err) });

@@ -354,20 +354,34 @@ test('poll cursors and announced rows round-trip through a flush, and a cursor w
   });
 });
 
-test('a lastPollAt that is not an instant loads as none, says so, and keeps the rest', () => {
+test('a lastPollAt that is not an instant loads as none, says so, and keeps the rest, cursors included', () => {
   const file = tempFile();
   const checkpoint = { id: 'chk_1', parent: null, createdAt: '2026-10-14T00:00:00.000Z' };
   writeFileSync(
     file,
-    JSON.stringify({ version: STATE_VERSION, checkpoints: [checkpoint], current: 'chk_1', created: {}, edited: {}, deleted: {}, lastPollAt: 'soon', pollKeys: ['issue:1:t0'] }),
+    JSON.stringify({ version: STATE_VERSION, checkpoints: [checkpoint], current: 'chk_1', created: {}, edited: {}, deleted: {}, lastPollAt: 'soon', pollKeys: ['issue:1:t0'], pollCursors: { 'x/y:issues': { since: '2026-10-14T00:00:00.000Z' } } }),
   );
   const log = capturingLogger();
   const state = GithubState.load(file, log);
   assert.equal(state.lastPollAt(), null);
   assert.equal(state.current(), 'chk_1');
   assert.equal(state.seenPollKey('issue:1:t0'), true);
+  assert.deepEqual(state.pollCursors(), { 'x/y:issues': { since: '2026-10-14T00:00:00.000Z' } });
   assert.equal(log.lines.length, 1);
   assert.match(log.lines[0], /lastPollAt that isn't a time/);
+});
+
+test('a lastPollAt that is null or left out loads quietly', () => {
+  for (const lastPollAt of [null, undefined]) {
+    const file = tempFile();
+    writeFileSync(
+      file,
+      JSON.stringify({ version: STATE_VERSION, checkpoints: [], current: null, created: {}, edited: {}, deleted: {}, lastPollAt, pollKeys: [] }),
+    );
+    const log = capturingLogger();
+    assert.equal(GithubState.load(file, log).lastPollAt(), null);
+    assert.deepEqual(log.lines, [], `lastPollAt ${String(lastPollAt)}`);
+  }
 });
 
 test('a polled head round-trips through a flush (amendment 2a)', async () => {

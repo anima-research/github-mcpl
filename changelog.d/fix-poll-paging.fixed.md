@@ -16,5 +16,8 @@
   again inside its window, after a stopped read or a refused delivery
   (`pollNew` in the state file). A first pass that a delivery refused keeps
   the window it read.
-- `getCheckRuns` reads on past a short page while `total_count` says more
-  runs follow, so such a head is no longer left undecided.
+- `getCheckRuns` reads on past a short page that isn't empty while
+  `total_count` says more runs follow, so such a head is no longer left
+  undecided. A response
+  without a `total_count` reads on past a full page instead of stopping at
+  the first.

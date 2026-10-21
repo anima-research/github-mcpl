@@ -88,7 +88,7 @@ export type PollerApi = Pick<
 >;
 
 /**
- * The durable state the poller needs: the cursor, the dedup ring and the last
+ * The durable state the poller needs: the cursors, the dedup ring and the last
  * polled head of each open pull request (amendment 2a). A structural subset of
  * `StateStore` (types.ts), which .7 implements over GITHUB_STATE_FILE —
  * `snapshot()` is in the interface so that the ring can be *read* without
@@ -349,12 +349,12 @@ export class Poller {
   }
 
   /**
-   * One pass: query every allow-listed repository since the cursor, drain as
+   * One pass: query every allow-listed repository's lists since their cursors, drain as
    * much of the check backlog as the per-pass cap allows, drop what the dedup
    * ring already holds, deliver the rest oldest-first, record each key after
    * its delivery, and advance the cursors if no delivery failed.
    *
-   * A failed *lookup* does not hold the cursor back: the head stays in the
+   * A failed *lookup* does not hold the cursors back: the head stays in the
    * backlog instead, which is the thing that gets retried. A failed
    * *delivery* does hold it back, so its row is queried again.
    *
@@ -435,7 +435,7 @@ export class Poller {
         outcome = await this.hand(candidate.event);
       } catch (err) {
         // Nothing is recorded and nothing is retired: the key stays out of
-        // the dedup ring, the head stays in the backlog, and the cursor is
+        // the dedup ring, the head stays in the backlog, and the cursors are
         // held back below, so the next pass tries again.
         result.failed += 1;
         this.logger.warn('poll event delivery failed; its key stays unrecorded for the next pass', {
@@ -484,13 +484,13 @@ export class Poller {
       this.state.setPolledNew(remembered);
       result.cursorAdvanced = true;
     } else {
-      this.logger.warn('poll cursor held back: a delivery failed in this pass', {
-        since,
+      this.logger.warn('poll cursors held back: a delivery failed in this pass, so every list reads it again', {
         failed: result.failed,
       });
     }
     this.logger.debug('poll pass done', {
-      since,
+      // Where a list with no cursor of its own started; the others started at their own.
+      fallbackSince: since,
       delivered: result.delivered.length,
       duplicates: result.duplicates,
       failed: result.failed,
@@ -655,7 +655,7 @@ export class Poller {
       }
 
       // Settled — but the head stays queued until the delivery loop retires
-      // it, so a refused event can be retried even after the cursor has moved
+      // it, so a refused event can be retried even after the cursors have moved
       // past the pull-request row that queued this head (rule 2).
       this.rotateHead(key, head);
       const pull: ThreadRef = { repo: head.repo, number: head.number, kind: 'pull' };

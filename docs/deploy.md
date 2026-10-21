@@ -15,7 +15,7 @@ user the agent runs as (`ubuntu` on a typical agent host):
 | `~/.config/github-mcpl/github-mcpl.env` | 600 | variable names and paths, **no secrets** |
 | `~/.config/github-mcpl/app-private-key.pem` | **600** | the App private key |
 | `~/.config/github-mcpl/webhook-secret` | **600** | the webhook secret, one line |
-| `~/.config/github-mcpl/state.json` | 600 | checkpoint lineage and the poll cursor |
+| `~/.config/github-mcpl/state.json` | 600 | checkpoint lineage and the polling state |
 
 The server refuses to start if either secret file is readable by group or
 other: `readConfig` stats both and reports the mode by name. That check is the

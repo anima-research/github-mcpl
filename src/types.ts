@@ -369,7 +369,7 @@ export interface PolledIssue {
   closedBy?: EventActor;
 }
 
-/** One issue comment or review comment updated since the cursor. */
+/** One issue comment or review comment updated since its list's cursor. */
 export interface PolledComment {
   id: number;
   /** The issue or pull request the comment belongs to. */

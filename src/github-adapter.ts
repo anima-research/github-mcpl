@@ -1051,18 +1051,21 @@ export class GitHubAdapter implements GitHubApi {
    *
    * The endpoint is paginated, and a busy commit can carry hundreds of runs:
    * reading one page and calling it `success` is how a failure on page two
-   * becomes a green light. So pages are followed until `total_count` runs are
-   * read, up to {@link CHECK_RUN_MAX_PAGES} pages, whatever a page's length;
-   * `total` is GitHub's own `total_count` rather than what we managed to read,
-   * and a sha whose runs did not all fit is never reported as a definite
-   * success — its conclusion is `null`, the same "not decided" the contract
-   * already uses for runs still in flight.
+   * becomes a green light. So pages are followed past a short one until
+   * `total_count` runs are read, up to {@link CHECK_RUN_MAX_PAGES} pages, or
+   * until a page comes back empty; `total` is GitHub's own `total_count`
+   * rather than what we managed to read, and a sha whose runs were not all
+   * read is never reported as a definite success — unless a run that was
+   * read failed, its conclusion is `null`, the same "not decided" the
+   * contract already uses for runs still in flight.
    */
   async getCheckRuns(repo: RepoRef, sha: string): Promise<ChecksSummary> {
     const runs: CheckRunRow[] = [];
     let totalCount = 0;
-    // Whether runs were left unread when the loop ended: then the sha is undecided.
+    // Whether runs were left unread when the loop ended: then the sha can't be a success.
     let more = false;
+    // Whether an empty page ended the read before `total_count` was reached.
+    let endedShort = false;
 
     for (let page = 1; page <= CHECK_RUN_MAX_PAGES; page++) {
       const batch = await this.call('getCheckRuns', async () => {
@@ -1082,15 +1085,23 @@ export class GitHubAdapter implements GitHubApi {
       // a response without one leaves a full page as the sign of more.
       more = totalCount > 0 ? runs.length < totalCount : batch.rows.length === CHECK_RUN_PAGE;
       if (!more) break;
+      // An empty page is past the last one: what `total_count` still counts
+      // can't be read, such as a run deleted between pages.
+      if (batch.rows.length === 0) {
+        endedShort = true;
+        break;
+      }
     }
 
     const truncated = more;
     if (truncated) {
-      this.log('warn', 'check runs did not fit in the page bound; the sha is reported undecided', {
-        sha,
-        read: runs.length,
-        total: totalCount,
-      });
+      this.log(
+        'warn',
+        endedShort
+          ? 'check runs ended before total_count; the sha is reported undecided unless a run read failed'
+          : 'check runs did not fit in the page bound; the sha is reported undecided unless a run read failed',
+        { sha, read: runs.length, total: totalCount },
+      );
     }
     return summarizeChecks(sha, runs, { total: Math.max(totalCount, runs.length), truncated });
   }

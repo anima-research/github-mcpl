@@ -913,10 +913,10 @@ test('a first pass whose read throws keeps the window it read', async () => {
   const api = new FakeGitHubApi();
   // The very first read throws, so the window must be kept before any read.
   api.listIssuesSince = async () => {
-    throw new Error('GitHub 502 on the comment page');
+    throw new Error('GitHub 502 on the issues page');
   };
   const r = rig({ api, cursor: null, now: '2026-10-14T00:00:00.700Z' });
-  await assert.rejects(() => r.poller.pollOnce(), /502 on the comment page/);
+  await assert.rejects(() => r.poller.pollOnce(), /502 on the issues page/);
   assert.equal(r.state.lastPollAt(), '2026-10-13T23:59:00.000Z');
 });
 

@@ -43,6 +43,16 @@ camel case, so a reviewer can map a contract bullet to a type by sight.
   `poll:<kind>:<id>:<updated_at>`, and asks `getCheckRuns` for the heads of
   the open PRs it saw, at most 20 per poll. These endpoints carry no
   `X-Poll-Interval`; `MIN_POLL_INTERVAL_MS` is the floor.
+  - Each `…Since` method returns `PollRead<T>`, `{ rows, resumeAt? }`:
+    `resumeAt` is set when the request bound stopped the read, and names the
+    second the next read asks from.
+  - `StateSnapshot` gains `pollCursors` (`<owner>/<name>:<list>` →
+    `{ since, resumeAt? }`) and `pollNew` (the same key → id → `created_at`),
+    read and written through `StateStore.pollCursors`/`setPollCursors` and
+    `polledNew`/`setPolledNew`. Both fields are **additive**: a state file
+    without them loads with no cursors and nothing remembered, so every list
+    starts from `lastPollAt`, and a release before them ignores them and
+    reads `lastPollAt`, up to which every list has delivered.
 - **Amendment 2a: a poll row's kind comes from `created_at` against the
   cursor.** Amendment 1 left the polling ingress unable to tell an opened
   issue from an edited one, so every open issue row arrived as `issue.edited`
@@ -70,7 +80,9 @@ camel case, so a reviewer can map a contract bullet to a type by sight.
     rather than not at all, which is the bounded cost of not leaving a cold
     start blind to what is already open.
   - The comparison is of instants, not strings: GitHub stamps rows without
-    milliseconds while the cursor carries them, and `'Z'` sorts after `'.'`.
+    milliseconds while a cursor is written with them (`.000Z`, and any
+    precision in a state file an older release wrote), and `'Z'` sorts after
+    `'.'`.
   - `StateSnapshot` gains `pollHeads` (`<owner>/<name>#<number>` → head sha),
     bounded by `POLL_HEAD_MEMORY` = 200 and recorded on a dropped row as well
     as on a delivered one. The field is **additive**: a state file written

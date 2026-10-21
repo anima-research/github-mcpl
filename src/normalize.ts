@@ -451,8 +451,9 @@ function normalizeCheckRun(base: EventBase, payload: unknown, actor: EventActor 
  * True when `at` is at or after `since` — both ISO-8601 instants.
  *
  * Compared as instants and not as strings: GitHub stamps a row
- * `2026-10-14T12:28:38Z` while the cursor carries milliseconds
- * (`2026-10-14T12:28:38.500Z`), and lexicographically `'Z'` (0x5A) sorts
+ * `2026-10-14T12:28:38Z` while a cursor is written with milliseconds
+ * (`2026-10-14T12:28:38.000Z`, or `.500Z` from an older release), and
+ * lexicographically `'Z'` (0x5A) sorts
  * *after* `'.'` (0x2E) — so a string compare calls the earlier instant the
  * later one. An unparseable stamp answers false, which is the fail-safe
  * direction: the row keeps the kind it had before amendment 2a.

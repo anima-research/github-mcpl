@@ -1149,6 +1149,40 @@ test('a read never stops inside a second, even past its request bound', async ()
   );
 });
 
+test('a read the bound finds inside a second reads to the end of the page that finishes it, and stops there', async () => {
+  // Rows 1–250 share second 1, which carries the read past its bound; rows 251–350 have a second each.
+  const r = await rig();
+  const all = [
+    ...Array.from({ length: 250 }, (_, i) => pagedIssue(1 + i, second(1))),
+    ...Array.from({ length: 100 }, (_, i) => pagedIssue(251 + i, second(2 + i))),
+  ];
+  serveSince(r, ISSUES, all);
+
+  const first = await r.adapter.listIssuesSince(REPO, '2026-10-10T00:00:00Z');
+  assert.deepEqual(
+    r.fake.for(ISSUES).map((c) => [c.query.since, c.query.page]),
+    [
+      ['2026-10-10T00:00:00Z', '1'],
+      [second(1), '1'],
+      [second(1), '2'],
+      [second(1), '3'],
+    ],
+  );
+  // Page 3 finished second 1 and ended at row 300's second: that second waits for the next read.
+  assert.equal(first.resumeAt, second(51));
+  assert.deepEqual(
+    first.rows.map((row) => row.id),
+    all.slice(0, 299).map((row) => row.id),
+  );
+
+  const next = await r.adapter.listIssuesSince(REPO, first.resumeAt as string);
+  assert.deepEqual(
+    [...first.rows, ...next.rows].map((row) => row.id),
+    all.map((row) => row.id),
+    'the two reads together return every row once',
+  );
+});
+
 test('a Link header without rel="next" ends the read', async () => {
   // GitHub's last page names only prev and first.
   const r = await rig();
@@ -1633,6 +1667,36 @@ test('getCheckRuns without a total_count is undecided when the page bound stops 
   const summary = await r.adapter.getCheckRuns(REPO, HEAD_SHA);
   assert.equal(summary.conclusion, null, 'what was not read cannot be called green');
   assert.equal(r.fake.for(`GET /repos/anima-research/rayforce/commits/${HEAD_SHA}/check-runs`).length, 5);
+});
+
+test('getCheckRuns ends at an empty page as undecided, and says the count was not reached', async () => {
+  // total_count counts a run that is gone by the time its page is asked for.
+  const r = await rig();
+  r.fake.on(`GET /repos/anima-research/rayforce/commits/${HEAD_SHA}/check-runs`, (req) => ({
+    body: { total_count: 101, check_runs: Number(req.query.page) === 1 ? successRuns(0, 100) : [] },
+  }));
+
+  const summary = await r.adapter.getCheckRuns(REPO, HEAD_SHA);
+  assert.equal(summary.conclusion, null);
+  assert.equal(r.fake.for(`GET /repos/anima-research/rayforce/commits/${HEAD_SHA}/check-runs`).length, 2);
+  assert.ok(r.logs.some((l) => l.startsWith('warn check runs ended before total_count')), r.logs.join('\n'));
+});
+
+test('a check-run read that ended short is still a failure when a run it read failed', async () => {
+  const r = await rig();
+  r.fake.on(`GET /repos/anima-research/rayforce/commits/${HEAD_SHA}/check-runs`, (req) => ({
+    body: {
+      total_count: 101,
+      check_runs:
+        Number(req.query.page) === 1
+          ? [...successRuns(0, 99), { name: 'lint', status: 'completed', conclusion: 'failure', html_url: 'https://ci/lint' }]
+          : [],
+    },
+  }));
+
+  const summary = await r.adapter.getCheckRuns(REPO, HEAD_SHA);
+  assert.equal(summary.conclusion, 'failure');
+  assert.ok(r.logs.some((l) => l.includes('undecided unless a run read failed')), r.logs.join('\n'));
 });
 
 test('summarizeChecks refuses to call a truncated read success', () => {

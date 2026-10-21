@@ -203,7 +203,7 @@ export class GithubState implements GithubStateStore {
     }
     const kept = (parsed as { lastPollAt?: unknown }).lastPollAt;
     if (kept !== undefined && kept !== null && snap.lastPollAt === null) {
-      logger.warn(`state: ${file} has a lastPollAt that isn't a time (${JSON.stringify(kept)}); polling starts one interval back`);
+      logger.warn(`state: ${file} has a lastPollAt that isn't a time (${JSON.stringify(kept)}); lists without a cursor of their own start one interval back`);
     }
     return new GithubState(file, snap, logger);
   }
