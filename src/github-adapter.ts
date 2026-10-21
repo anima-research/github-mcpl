@@ -55,6 +55,7 @@ import {
   type Logger,
   type PolledComment,
   type PolledIssue,
+  type PollRead,
   type PullRequest,
   type PullRequestFile,
   type RepoRef,
@@ -111,13 +112,13 @@ const CHECK_RUN_PAGE = 100;
  */
 const CHECK_RUN_MAX_PAGES = 5;
 /**
- * Documented exception to the 50-entry cap: the three `…Since` polls (contract
- * amendment 1) feed the event pipeline, not a rendered list, so dropping rows
- * drops events. They page 100 at a time up to this many rows per call.
+ * Requests one `…Since` poll makes before it stops, past which it goes on
+ * only to finish a second it is part way through, and leaves the rest for a
+ * later pass, which reads on from where it stopped. A documented exception to
+ * the 50-entry cap: these lists feed the event pipeline, not a rendered list,
+ * so they read 100 rows a request.
  */
-export const POLL_MAX_ENTRIES = 300;
-/** Pages a `…Since` poll will ask for before it stops, whatever is left. */
-const POLL_MAX_PAGES = 3;
+export const POLL_MAX_PAGES = 3;
 /**
  * Amendment 1: "at most 20 PRs per poll". `listIssuesSince` fills `headSha`
  * for at most this many open pull requests; the rest come back without one.
@@ -410,6 +411,15 @@ function mapComment(data: ApiComment): Comment {
 function numberFromUrl(url: string | null | undefined): number {
   const m = /\/(?:issues|pulls)\/(\d+)(?:$|[?#])/.exec(url ?? '');
   return m ? Number(m[1]) : 0;
+}
+
+/**
+ * Whether a response's `Link` header names a next page, which is GitHub's
+ * signal that more follow. A page's length is not: a page shorter than
+ * `per_page` is no proof of the end.
+ */
+function hasNextPage(link: string | undefined): boolean {
+  return /(?:^|,)\s*<[^>]*>\s*;\s*rel="next"/.test(link ?? '');
 }
 
 /**
@@ -1041,15 +1051,21 @@ export class GitHubAdapter implements GitHubApi {
    *
    * The endpoint is paginated, and a busy commit can carry hundreds of runs:
    * reading one page and calling it `success` is how a failure on page two
-   * becomes a green light. So pages are followed to {@link CHECK_RUN_MAX_PAGES},
-   * `total` is GitHub's own `total_count` rather than what we managed to read,
-   * and a sha whose runs did not all fit is never reported as a definite
-   * success — its conclusion is `null`, the same "not decided" the contract
-   * already uses for runs still in flight.
+   * becomes a green light. So pages are followed past a short one until
+   * `total_count` runs are read, up to {@link CHECK_RUN_MAX_PAGES} pages, or
+   * until a page comes back empty; `total` is GitHub's own `total_count`
+   * rather than what we managed to read, and a sha whose runs were not all
+   * read is never reported as a definite success — unless a run that was
+   * read failed, its conclusion is `null`, the same "not decided" the
+   * contract already uses for runs still in flight.
    */
   async getCheckRuns(repo: RepoRef, sha: string): Promise<ChecksSummary> {
     const runs: CheckRunRow[] = [];
     let totalCount = 0;
+    // Whether runs were left unread when the loop ended: then the sha can't be a success.
+    let more = false;
+    // Whether an empty page ended the read before `total_count` was reached.
+    let endedShort = false;
 
     for (let page = 1; page <= CHECK_RUN_MAX_PAGES; page++) {
       const batch = await this.call('getCheckRuns', async () => {
@@ -1065,16 +1081,27 @@ export class GitHubAdapter implements GitHubApi {
       });
       if (page === 1) totalCount = batch.total;
       runs.push(...batch.rows);
-      if (batch.rows.length < CHECK_RUN_PAGE || runs.length >= totalCount) break;
+      // `total_count` says how many there are, so a short page is no end;
+      // a response without one leaves a full page as the sign of more.
+      more = totalCount > 0 ? runs.length < totalCount : batch.rows.length === CHECK_RUN_PAGE;
+      if (!more) break;
+      // An empty page is past the last one: what `total_count` still counts
+      // can't be read, such as a run deleted between pages.
+      if (batch.rows.length === 0) {
+        endedShort = true;
+        break;
+      }
     }
 
-    const truncated = runs.length < totalCount;
+    const truncated = more;
     if (truncated) {
-      this.log('warn', 'check runs did not fit in the page bound; the sha is reported undecided', {
-        sha,
-        read: runs.length,
-        total: totalCount,
-      });
+      this.log(
+        'warn',
+        endedShort
+          ? 'check runs ended before total_count; the sha is reported undecided unless a run read failed'
+          : 'check runs did not fit in the page bound; the sha is reported undecided unless a run read failed',
+        { sha, read: runs.length, total: totalCount },
+      );
     }
     return summarizeChecks(sha, runs, { total: Math.max(totalCount, runs.length), truncated });
   }
@@ -1350,24 +1377,26 @@ export class GitHubAdapter implements GitHubApi {
   // ───────────────────────────────────────────────────────────────────────────
 
   /**
-   * Issues and pull requests touched at or after `since`, oldest first so the
-   * poller's cursor only ever moves forward. Bounded by
-   * {@link POLL_MAX_ENTRIES} rather than by the 50-entry list cap: these rows
-   * become events, and a dropped row is a dropped event.
+   * Issues and pull requests touched at or after `since`, in the order read:
+   * oldest change first, except that a row changed while the list is read
+   * keeps the place it was first read at (the poller sorts what it
+   * delivers). Bounded by {@link POLL_MAX_PAGES} requests rather than by the
+   * 50-entry list cap: these rows become events, so a read the bound stops
+   * says where it stopped (`resumeAt`) and the next one reads on from there.
    *
    * `headSha` is filled for at most {@link POLL_PR_HEAD_LIMIT} open pull
    * requests (amendment 1's "at most 20 PRs per poll"); the issues endpoint
    * does not carry it, so each one costs a read.
    */
-  async listIssuesSince(repo: RepoRef, since: string): Promise<PolledIssue[]> {
-    const rows = await this.pollPages<ApiIssue>('listIssuesSince', (page) =>
+  async listIssuesSince(repo: RepoRef, since: string): Promise<PollRead<PolledIssue>> {
+    const { rows, resumeAt } = await this.pollSince<ApiIssue>('listIssuesSince', since, (from, page) =>
       this.octokit.request('GET /repos/{owner}/{repo}/issues', {
         owner: repo.owner,
         repo: repo.name,
         state: 'all',
         sort: 'updated',
         direction: 'asc',
-        since,
+        since: from,
         per_page: 100,
         page,
       }),
@@ -1399,39 +1428,41 @@ export class GitHubAdapter implements GitHubApi {
       });
       if (head) pull.headSha = head;
     }
-    return polled;
+    return resumeAt === undefined ? { rows: polled } : { rows: polled, resumeAt };
   }
 
   /** Issue comments updated at or after `since`. Bounded like the issues poll. */
-  async listIssueCommentsSince(repo: RepoRef, since: string): Promise<PolledComment[]> {
-    const rows = await this.pollPages<ApiComment>('listIssueCommentsSince', (page) =>
+  async listIssueCommentsSince(repo: RepoRef, since: string): Promise<PollRead<PolledComment>> {
+    const { rows, resumeAt } = await this.pollSince<ApiComment>('listIssueCommentsSince', since, (from, page) =>
       this.octokit.request('GET /repos/{owner}/{repo}/issues/comments', {
         owner: repo.owner,
         repo: repo.name,
         sort: 'updated',
         direction: 'asc',
-        since,
+        since: from,
         per_page: 100,
         page,
       }),
     );
-    return rows.map((row) => mapPolledComment(row, numberFromUrl(row.issue_url)));
+    const polled = rows.map((row) => mapPolledComment(row, numberFromUrl(row.issue_url)));
+    return resumeAt === undefined ? { rows: polled } : { rows: polled, resumeAt };
   }
 
   /** Review comments updated at or after `since`. Bounded like the issues poll. */
-  async listReviewCommentsSince(repo: RepoRef, since: string): Promise<PolledComment[]> {
-    const rows = await this.pollPages<ApiComment>('listReviewCommentsSince', (page) =>
+  async listReviewCommentsSince(repo: RepoRef, since: string): Promise<PollRead<PolledComment>> {
+    const { rows, resumeAt } = await this.pollSince<ApiComment>('listReviewCommentsSince', since, (from, page) =>
       this.octokit.request('GET /repos/{owner}/{repo}/pulls/comments', {
         owner: repo.owner,
         repo: repo.name,
         sort: 'updated',
         direction: 'asc',
-        since,
+        since: from,
         per_page: 100,
         page,
       }),
     );
-    return rows.map((row) => mapPolledComment(row, numberFromUrl(row.pull_request_url)));
+    const polled = rows.map((row) => mapPolledComment(row, numberFromUrl(row.pull_request_url)));
+    return resumeAt === undefined ? { rows: polled } : { rows: polled, resumeAt };
   }
 
   /**
@@ -1469,41 +1500,67 @@ export class GitHubAdapter implements GitHubApi {
   }
 
   /**
-   * Page a `…Since` poll: pages of 100 until a short page, {@link POLL_MAX_PAGES}
-   * pages, or {@link POLL_MAX_ENTRIES} rows, whichever comes first.
+   * Read a `…Since` list, which GitHub sorts by `updated_at`, oldest first.
+   *
+   * Each request after the first asks from the last row's `updated_at`
+   * rather than for the next page, so a row updated while the list is being
+   * read, which moves to the end, can only move into what is still to be
+   * read: an offset would slide an unread row onto a page already read. The
+   * rows of that second come back again and are dropped by id, keeping the
+   * later copy. When a whole page shares one second, the next request asks
+   * that second's next page; that paging is by offset, so it holds while
+   * GitHub keeps one second's rows in the same order from page to page,
+   * which hasn't been checked, and a row of that second changed meanwhile can
+   * move another past a page. Only {@link hasNextPage} says whether more are
+   * waiting.
+   *
+   * After {@link POLL_MAX_PAGES} requests the read stops, but never inside a
+   * second: the rows of the second it stopped in are left out, and
+   * `resumeAt` names that second for the next read to ask from. GitHub's
+   * `since` includes its own second, so nothing between is skipped, and no
+   * row this read returns comes back unchanged in the next.
    */
-  private async pollPages<T>(
+  private async pollSince<T extends { id?: number; updated_at?: string | null }>(
     operation: string,
-    fetchPage: (page: number) => Promise<{ data: unknown }>,
-  ): Promise<T[]> {
-    const rows: T[] = [];
-    let truncated = false;
-    for (let page = 1; ; page++) {
-      const batch = await this.call(operation, async () => {
-        const res = await fetchPage(page);
-        return (Array.isArray(res.data) ? res.data : []) as T[];
+    since: string,
+    fetchPage: (from: string, page: number) => Promise<{ data: unknown; headers: { link?: string } }>,
+  ): Promise<{ rows: T[]; resumeAt?: string }> {
+    const rows = new Map<number, T>();
+    let from = since;
+    let page = 1;
+    // True while the requests page through one `since`, which a stop must not cut.
+    let byPage = false;
+    for (let requests = 0; ; requests++) {
+      if (requests >= POLL_MAX_PAGES && !byPage) {
+        const stop = Date.parse(from);
+        for (const [id, row] of rows) {
+          if (Date.parse(row.updated_at ?? '') >= stop) rows.delete(id);
+        }
+        this.log('warn', 'poll page cap reached; a later pass reads the rest from resumeAt', {
+          operation,
+          kept: rows.size,
+          resumeAt: from,
+        });
+        return { rows: [...rows.values()], resumeAt: from };
+      }
+      const { batch, more } = await this.call(operation, async () => {
+        const res = await fetchPage(from, page);
+        return { batch: (Array.isArray(res.data) ? res.data : []) as T[], more: hasNextPage(res.headers.link) };
       });
-      rows.push(...batch);
-      // A short page is the end of the list; a full one means more is waiting.
-      if (batch.length < 100) break;
-      if (page >= POLL_MAX_PAGES || rows.length >= POLL_MAX_ENTRIES) {
-        truncated = true;
-        break;
+      // A row read again replaces its earlier copy.
+      for (const row of batch) rows.set(row.id ?? 0, row);
+      if (!more) return { rows: [...rows.values()] };
+      const lastAt = batch.at(-1)?.updated_at ?? '';
+      const last = Date.parse(lastAt);
+      // One second's rows fill the page, or there is no stamp to read on from: by page.
+      byPage = !Number.isFinite(last) || last === Date.parse(from);
+      if (byPage) {
+        page += 1;
+      } else {
+        from = lastAt;
+        page = 1;
       }
     }
-    if (rows.length > POLL_MAX_ENTRIES) {
-      rows.length = POLL_MAX_ENTRIES;
-      truncated = true;
-    }
-    if (truncated) {
-      // The poller's cursor only advances over rows it saw, so the rest come
-      // back next tick rather than being lost.
-      this.log('warn', 'poll page cap reached; the cursor will pick the rest up next tick', {
-        operation,
-        kept: rows.length,
-      });
-    }
-    return rows;
   }
 
   /** A pull request payload plus the check runs on its head sha. */

@@ -451,13 +451,14 @@ function normalizeCheckRun(base: EventBase, payload: unknown, actor: EventActor 
  * True when `at` is at or after `since` — both ISO-8601 instants.
  *
  * Compared as instants and not as strings: GitHub stamps a row
- * `2026-10-14T12:28:38Z` while the cursor carries milliseconds
- * (`2026-10-14T12:28:38.500Z`), and lexicographically `'Z'` (0x5A) sorts
+ * `2026-10-14T12:28:38Z` while a cursor is written with milliseconds
+ * (`2026-10-14T12:28:38.000Z`, or `.500Z` from an older release), and
+ * lexicographically `'Z'` (0x5A) sorts
  * *after* `'.'` (0x2E) — so a string compare calls the earlier instant the
  * later one. An unparseable stamp answers false, which is the fail-safe
  * direction: the row keeps the kind it had before amendment 2a.
  */
-function atOrAfter(at: string, since: string): boolean {
+export function atOrAfter(at: string, since: string): boolean {
   const a = Date.parse(at);
   const b = Date.parse(since);
   return Number.isFinite(a) && Number.isFinite(b) && a >= b;
@@ -468,10 +469,15 @@ function atOrAfter(at: string, since: string): boolean {
  *
  * A `since` query reports *that* a row changed, never *how* — there is no
  * action — so amendment 2a derives the one from the row's own `created_at`
- * against the cursor the pass queried with:
+ * against `since`, the start of the window the poller has not finished
+ * reading (`PollCursor.since` in types.ts):
  *
- *   - **opened** when the row was created at or after `since`: this pass is
- *     the first that could have seen it, so `issue.opened` / `pull.opened`.
+ *   - **opened** when the row was created at or after `since` and the poller
+ *     hasn't announced it as new already (`announced`): this pass is the
+ *     first that could have seen it, so `issue.opened` / `pull.opened`. A
+ *     row is read again inside its window after a stopped read, a refused
+ *     delivery, or in the second a pass starts in, and `announced` keeps it
+ *     from being opened twice.
  *   - otherwise an **issue** row is `issue.edited` (or `issue.closed`, below)
  *     when its state, title or body differs from what the last pass recorded
  *     for it ({@link polledMarker}), and is **dropped** when they do not. A
@@ -517,9 +523,10 @@ export function normalizePolledIssue(
   receivedAt: string,
   since: string,
   previousMarker?: string,
+  announced = false,
 ): NormalizedEvent | null {
   const key = pollKey('issue', row.id, row.updatedAt);
-  const isNew = atOrAfter(row.createdAt, since);
+  const isNew = !announced && atOrAfter(row.createdAt, since);
   const closed = row.state === 'closed';
   const changed = previousMarker === undefined || polledMarker(row) !== previousMarker;
   let kind: NormalizedEventKind;

@@ -595,10 +595,20 @@ function pollState(cursor: string): IngressState {
   const keys: string[] = [];
   const heads = new Map<string, string>();
   let at = cursor;
+  let cursors = {};
+  let fresh = {};
   return {
     lastPollAt: () => at,
     setLastPollAt: (when) => {
       at = when;
+    },
+    pollCursors: () => cursors,
+    setPollCursors: (next) => {
+      cursors = { ...next };
+    },
+    polledNew: () => fresh,
+    setPolledNew: (next) => {
+      fresh = next;
     },
     polledHead: (channel) => heads.get(channel) ?? null,
     setPolledHead: (channel, sha) => {
@@ -774,7 +784,7 @@ test('a webhook refusal after the cursor passed the row does not cost the poll i
   assert.equal(first.cursorAdvanced, true);
   assert.equal(first.checksBacklog, 1);
   // From here the pull-request row is behind the cursor.
-  assert.deepEqual(await api.listIssuesSince(TEST_REPO, state.lastPollAt() as string), []);
+  assert.deepEqual((await api.listIssuesSince(TEST_REPO, state.lastPollAt() as string)).rows, []);
 
   // The checks settle, and a webhook for the sha blocks in the listener.
   settled = true;

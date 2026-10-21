@@ -115,21 +115,21 @@ test('FakeGitHubApi reports check runs and answers since-polls', async () => {
   const fresh = api.seedPullRequest({ updatedAt: '2026-10-02T00:00:00.000Z' });
   const comment = await api.createComment({ repo: TEST_REPO, number: old.number, kind: 'issue' }, 'late comment');
   const since = '2026-10-01T12:00:00.000Z';
-  const issues = await api.listIssuesSince(TEST_REPO, since);
+  const { rows: issues } = await api.listIssuesSince(TEST_REPO, since);
   assert.deepEqual(issues.map((i) => [i.number, i.isPullRequest]), [[fresh.number, true]]);
   assert.equal(issues[0].headSha, fresh.head.sha);
-  const comments = await api.listIssueCommentsSince(TEST_REPO, since);
+  const { rows: comments } = await api.listIssueCommentsSince(TEST_REPO, since);
   assert.deepEqual(comments.map((c) => [c.id, c.number]), [[comment.id, old.number]]);
-  assert.deepEqual(await api.listReviewCommentsSince(TEST_REPO, since), []);
-  assert.deepEqual(await api.listIssuesSince({ owner: 'other', name: 'repo' }, since), []);
+  assert.deepEqual((await api.listReviewCommentsSince(TEST_REPO, since)).rows, []);
+  assert.deepEqual((await api.listIssuesSince({ owner: 'other', name: 'repo' }, since)).rows, []);
 
   // An old review comment edited after the cursor is polled (reviewer finding).
   api.seedReviewThread({ repo: TEST_REPO, number: fresh.number, kind: 'pull' }, {
     comments: [{ id: 555, author: { login: 'human', isBot: false }, body: 'before', createdAt: '2026-10-01T00:00:00.000Z' }],
   });
-  assert.deepEqual(await api.listReviewCommentsSince(TEST_REPO, since), []);
+  assert.deepEqual((await api.listReviewCommentsSince(TEST_REPO, since)).rows, []);
   await api.updateComment(TEST_REPO, 555, 'after', true);
-  const polledReview = await api.listReviewCommentsSince(TEST_REPO, since);
+  const { rows: polledReview } = await api.listReviewCommentsSince(TEST_REPO, since);
   assert.deepEqual(polledReview.map((c) => [c.id, c.number, c.body]), [[555, fresh.number, 'after']]);
 });
 

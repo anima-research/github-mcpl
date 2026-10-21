@@ -33,23 +33,43 @@ camel case, so a reviewer can map a contract bullet to a type by sight.
   `issues?state=all&sort=updated&since=`), `listIssueCommentsSince`
   (`issues/comments?sort=updated&since=`) and `listReviewCommentsSince`
   (`pulls/comments?sort=updated&since=`), returning `PolledIssue` /
-  `PolledComment` rows. The poller (.3) keeps the cursor `lastPollAt`, dedups
+  `PolledComment` rows, each list read by `updated_at` rather than by page
+  offset, three requests a pass and more only to finish a second. The poller
+  (.3) keeps a cursor for each repository's list in whole seconds
+  (`pollCursors`, starting from `lastPollAt` until it has its own), which a
+  read stopped at that bound leaves where it stopped, dedups
   with the key `<kind>:<id>:<updated_at>` through `StateStore.seenPollKey`
   (ring of `POLL_DEDUP_RING` = 2000 keys, .7), names poll events
   `poll:<kind>:<id>:<updated_at>`, and asks `getCheckRuns` for the heads of
   the open PRs it saw, at most 20 per poll. These endpoints carry no
   `X-Poll-Interval`; `MIN_POLL_INTERVAL_MS` is the floor.
+  - Each `…Since` method returns `PollRead<T>`, `{ rows, resumeAt? }`:
+    `resumeAt` is set when the request bound stopped the read, and names the
+    second the next read asks from.
+  - `StateSnapshot` gains `pollCursors` (`<owner>/<name>:<list>` →
+    `{ since, resumeAt? }`) and `pollNew` (the same key → id → `created_at`),
+    read and written through `StateStore.pollCursors`/`setPollCursors` and
+    `polledNew`/`setPolledNew`. Both fields are **additive**: a state file
+    without them loads with no cursors and nothing remembered, so every list
+    starts from `lastPollAt`, and a release before them ignores them and
+    reads `lastPollAt`, up to which every list has delivered.
 - **Amendment 2a: a poll row's kind comes from `created_at` against the
   cursor.** Amendment 1 left the polling ingress unable to tell an opened
   issue from an edited one, so every open issue row arrived as `issue.edited`
   and a recipe keyed on `github:issue=opened` could never fire on it (found by
   the WP10 end-to-end run). A `since` query still carries no action, but it
   does carry `created_at`, and that is enough: `PolledIssue` gains `createdAt`
-  and `normalizePolledIssue(repo, row, receivedAt, since, previousHeadSha?)`
+  and `normalizePolledIssue(repo, row, receivedAt, since, previousHeadSha?, announced?)`
   derives the kind from it.
-  - An **issue** row created at or after `since` is `issue.opened`; otherwise
-    `issue.edited`, as before. Closed rows stay `issue.closed`.
-  - A **pull-request** row created at or after `since` is `pull.opened`. An
+  - An **issue** row created at or after `since`, and not announced as new
+    already (`announced`), is `issue.opened`; otherwise
+    `issue.edited`, as before. Closed rows stay `issue.closed`. `since` is
+    the start of the list's window, which stays put while a stopped read is
+    caught up. The state also keeps the rows announced as new while their
+    `created_at` is inside the window (`pollNew`), so a row read again there
+    is not opened twice.
+  - A **pull-request** row created at or after `since`, and not announced
+    as new already, is `pull.opened`. An
     open row seen again is `pull.synchronize` when its head sha moved away
     from the one the last pass recorded, and is **dropped** (null) when it did
     not: every comment on a pull request bumps its row, and the comment and
@@ -60,7 +80,9 @@ camel case, so a reviewer can map a contract bullet to a type by sight.
     rather than not at all, which is the bounded cost of not leaving a cold
     start blind to what is already open.
   - The comparison is of instants, not strings: GitHub stamps rows without
-    milliseconds while the cursor carries them, and `'Z'` sorts after `'.'`.
+    milliseconds while a cursor is written with them (`.000Z`, and any
+    precision in a state file an older release wrote), and `'Z'` sorts after
+    `'.'`.
   - `StateSnapshot` gains `pollHeads` (`<owner>/<name>#<number>` → head sha),
     bounded by `POLL_HEAD_MEMORY` = 200 and recorded on a dropped row as well
     as on a delivered one. The field is **additive**: a state file written

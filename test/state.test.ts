@@ -310,7 +310,78 @@ test('a state file written before amendment 2a still loads, with no heads known'
   assert.equal(state.lastPollAt(), '2026-10-14T00:00:00.000Z');
   assert.equal(state.seenPollKey('issue:1:t0'), true);
   assert.deepEqual(state.snapshot().pollHeads, {});
+  // Nor per-list cursors, so every list starts from `lastPollAt`.
+  assert.deepEqual(state.pollCursors(), {});
+  assert.deepEqual(state.polledNew(), {});
   assert.deepEqual(log.lines, []);
+});
+
+test('poll cursors and announced rows round-trip through a flush, and a cursor without an instant is dropped', async () => {
+  const file = tempFile();
+  const first = GithubState.load(file, capturingLogger());
+  first.setPollCursors({
+    'anima-research/rayforce:issues': { since: '2026-10-14T00:00:00.000Z', resumeAt: '2026-10-14T06:00:00Z' },
+    'anima-research/rayforce:issue_comments': { since: '2026-10-14T07:00:00.000Z' },
+  });
+  first.setPolledNew({ 'anima-research/rayforce:issues': { '7': '2026-10-14T01:00:00Z' } });
+  await first.flush();
+  const onDisk = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+  onDisk.pollCursors = {
+    ...(onDisk.pollCursors as object),
+    'x/y:issues': { resumeAt: '2026-10-14T06:00:00Z' },
+    'x/y:issue_comments': 'w',
+    'x/y:review_comments': null,
+    'x/z:issues': { since: 'not a time' },
+    'x/z:issue_comments': { since: '2026-10-14T07:00:00.000Z', resumeAt: 'not a time' },
+  };
+  onDisk.pollNew = {
+    ...(onDisk.pollNew as object),
+    'x/y:issues': ['a'],
+    'x/z:issues': { '3': 5, '4': '2026-10-14T02:00:00Z' },
+  };
+  writeFileSync(file, JSON.stringify(onDisk));
+
+  const loaded = GithubState.load(file, capturingLogger());
+  assert.deepEqual(loaded.pollCursors(), {
+    'anima-research/rayforce:issues': { since: '2026-10-14T00:00:00.000Z', resumeAt: '2026-10-14T06:00:00Z' },
+    'anima-research/rayforce:issue_comments': { since: '2026-10-14T07:00:00.000Z' },
+    'x/z:issue_comments': { since: '2026-10-14T07:00:00.000Z' },
+  });
+  assert.deepEqual(loaded.polledNew(), {
+    'anima-research/rayforce:issues': { '7': '2026-10-14T01:00:00Z' },
+    'x/y:issues': {},
+    'x/z:issues': { '4': '2026-10-14T02:00:00Z' },
+  });
+});
+
+test('a lastPollAt that is not an instant loads as none, says so, and keeps the rest, cursors included', () => {
+  const file = tempFile();
+  const checkpoint = { id: 'chk_1', parent: null, createdAt: '2026-10-14T00:00:00.000Z' };
+  writeFileSync(
+    file,
+    JSON.stringify({ version: STATE_VERSION, checkpoints: [checkpoint], current: 'chk_1', created: {}, edited: {}, deleted: {}, lastPollAt: 'soon', pollKeys: ['issue:1:t0'], pollCursors: { 'x/y:issues': { since: '2026-10-14T00:00:00.000Z' } } }),
+  );
+  const log = capturingLogger();
+  const state = GithubState.load(file, log);
+  assert.equal(state.lastPollAt(), null);
+  assert.equal(state.current(), 'chk_1');
+  assert.equal(state.seenPollKey('issue:1:t0'), true);
+  assert.deepEqual(state.pollCursors(), { 'x/y:issues': { since: '2026-10-14T00:00:00.000Z' } });
+  assert.equal(log.lines.length, 1);
+  assert.match(log.lines[0], /lastPollAt that isn't a time/);
+});
+
+test('a lastPollAt that is null or left out loads quietly', () => {
+  for (const lastPollAt of [null, undefined]) {
+    const file = tempFile();
+    writeFileSync(
+      file,
+      JSON.stringify({ version: STATE_VERSION, checkpoints: [], current: null, created: {}, edited: {}, deleted: {}, lastPollAt, pollKeys: [] }),
+    );
+    const log = capturingLogger();
+    assert.equal(GithubState.load(file, log).lastPollAt(), null);
+    assert.deepEqual(log.lines, [], `lastPollAt ${String(lastPollAt)}`);
+  }
 });
 
 test('a polled head round-trips through a flush (amendment 2a)', async () => {

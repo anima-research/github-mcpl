@@ -41,6 +41,7 @@ import {
   type IssueSearchHit,
   type PolledComment,
   type PolledIssue,
+  type PollRead,
   type PullRequest,
   type PullRequestFile,
   type RepoRef,
@@ -555,7 +556,7 @@ export class FakeGitHubApi implements GitHubApi {
     return threadKey.startsWith(`${repoSlug(repo)}#`);
   }
 
-  async listIssuesSince(repo: RepoRef, since: string): Promise<PolledIssue[]> {
+  async listIssuesSince(repo: RepoRef, since: string): Promise<PollRead<PolledIssue>> {
     this.record('listIssuesSince', repo, since);
     const rows: PolledIssue[] = [];
     for (const [k, i] of this.issues) {
@@ -568,10 +569,10 @@ export class FakeGitHubApi implements GitHubApi {
       if (!this.inRepo(repo, k) || p.updatedAt <= since) continue;
       rows.push({ id: p.number, number: p.number, isPullRequest: true, title: p.title, body: p.body, state: p.state, author: p.author, createdAt: p.createdAt, updatedAt: p.updatedAt, html_url: p.html_url, headSha: p.head.sha });
     }
-    return rows.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));
+    return { rows: rows.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt)) };
   }
 
-  async listIssueCommentsSince(repo: RepoRef, since: string): Promise<PolledComment[]> {
+  async listIssueCommentsSince(repo: RepoRef, since: string): Promise<PollRead<PolledComment>> {
     this.record('listIssueCommentsSince', repo, since);
     const rows: PolledComment[] = [];
     for (const [k, list] of this.comments) {
@@ -581,10 +582,10 @@ export class FakeGitHubApi implements GitHubApi {
         if (c.updatedAt > since) rows.push({ id: c.id, number, author: c.author, body: c.body, updatedAt: c.updatedAt, html_url: c.html_url });
       }
     }
-    return rows.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));
+    return { rows: rows.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt)) };
   }
 
-  async listReviewCommentsSince(repo: RepoRef, since: string): Promise<PolledComment[]> {
+  async listReviewCommentsSince(repo: RepoRef, since: string): Promise<PollRead<PolledComment>> {
     this.record('listReviewCommentsSince', repo, since);
     const rows: PolledComment[] = [];
     for (const [k, threads] of this.reviewThreads) {
@@ -599,7 +600,7 @@ export class FakeGitHubApi implements GitHubApi {
         }
       }
     }
-    return rows.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));
+    return { rows: rows.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt)) };
   }
 
   async getAuthenticatedBot(): Promise<BotIdentity> {

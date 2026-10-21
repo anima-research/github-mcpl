@@ -238,10 +238,10 @@ told where Node is instead of looking.
 | `GITHUB_WEBHOOK_SECRET_FILE` | when `GITHUB_WEBHOOK_PORT` is set | — | Path to the webhook secret, mode 600. |
 | `GITHUB_WEBHOOK_PORT` | no | unset = listener off | TCP port of the webhook listener (bind it to loopback, terminate TLS in front). |
 | `GITHUB_WEBHOOK_PATH` | no | `/github/webhook` | Path the listener answers on. |
-| `GITHUB_POLL_INTERVAL_MS` | no | `0` (off) | Polling fallback: issues and PRs, issue comments and review comments updated since the cursor, plus the checks on the heads of the open PRs seen. `0` is off; a non-zero value below `60000` is refused. Partial — it cannot see a submitted review, a review request or a push ([what polling misses](docs/deploy.md#option-3--polling-only-no-webhook-at-all)) — and it is not meant to run alongside the webhook. |
+| `GITHUB_POLL_INTERVAL_MS` | no | `0` (off) | Polling fallback: issues and PRs, issue comments and review comments updated since each list's cursor, plus the checks on the heads of the open PRs seen. `0` is off; a non-zero value below `60000` is refused. Partial — it cannot see a submitted review, a review request or a push ([what polling misses](docs/deploy.md#option-3--polling-only-no-webhook-at-all)) — and it is not meant to run alongside the webhook. |
 | `GITHUB_REPOS` | yes | — | Comma-separated `owner/name` allow-list; a write anywhere else is refused by name. Several entries must share one owner (one App installation, one token); a second owner is a second server process. With several, every tool call names its repository. |
 | `GITHUB_PR_BASE_ALLOW` | no | empty = no PR target allowed | Branches a pull request may target or be retargeted to. A plain `branch` applies to every repository, `owner/name:branch` to that one: `anima-research/rayforce:dev,main`. |
-| `GITHUB_STATE_FILE` | no | unset = in-memory only | Durable JSON: checkpoint lineage, rollback bookkeeping, the poll cursor. |
+| `GITHUB_STATE_FILE` | no | unset = in-memory only | Durable JSON: checkpoint lineage, rollback bookkeeping, and the polling state: a cursor for each repository and list (`pollCursors`), `lastPollAt` where a list with none starts, and the rows announced as new (`pollNew`). A list with a cursor of its own starts from it, not from `lastPollAt`. |
 | `GITHUB_BOT_LOGIN` | yes | — | The App's bot login, e.g. `rayforce-clone[bot]`. From-self and mention detection depend on it. |
 | `GITHUB_MAINTAINERS` | no | empty | Comma-separated logins marked `isMaintainer` in metadata and tagged `github:actor=maintainer`. |
 
