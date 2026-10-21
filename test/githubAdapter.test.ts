@@ -24,15 +24,19 @@ import { after, test } from 'node:test';
 import {
   GitHubAdapter,
   GitHubApiError,
-  POLL_MAX_ENTRIES,
+  POLL_MAX_PAGES,
   POLL_PR_HEAD_LIMIT,
   REDACTED,
   redactSecrets,
   summarizeChecks,
 } from '../src/github-adapter.js';
+import { Poller } from '../src/poller.js';
+import { GithubState } from '../src/state.js';
 import {
   GITHUB_API_METHODS,
   readConfig,
+  silentLogger,
+  type NormalizedEvent,
   type Config,
   type Logger,
   type RepoRef,
@@ -998,7 +1002,7 @@ test('listIssuesSince asks the documented query and fills the head sha of open P
     ],
   });
 
-  const rows = await r.adapter.listIssuesSince(REPO, since);
+  const { rows } = await r.adapter.listIssuesSince(REPO, since);
   // The list carries closed_by; a closed row is attributed to its closer.
   assert.deepEqual(rows[2].closedBy, { login: 'rayforce-clone[bot]', isBot: true });
   assert.equal(rows[0].closedBy, undefined);
@@ -1020,22 +1024,327 @@ test('listIssuesSince asks the documented query and fills the head sha of open P
   assert.equal(r.fake.for('GET /repos/anima-research/rayforce/pulls/12').length, 1);
 });
 
-test('the issues poll pages up to its documented bound and no further', async () => {
-  const r = await rig();
-  const page = (n: number) =>
-    Array.from({ length: 100 }, (_, i) => ({ ...ISSUE_PAYLOAD, id: n * 1000 + i, number: n * 1000 + i }));
-  r.fake.on('GET /repos/anima-research/rayforce/issues', (req) => ({ body: page(Number(req.query.page)) }));
+/** An issue row for a paging test: its number is its id, created before any cursor below. */
+function pagedIssue(id: number, updatedAt: string) {
+  return { ...ISSUE_PAYLOAD, id, number: id, created_at: '2026-10-01T00:00:00Z', updated_at: updatedAt };
+}
 
-  const rows = await r.adapter.listIssuesSince(REPO, '2026-10-10T00:00:00Z');
-  assert.equal(rows.length, POLL_MAX_ENTRIES);
+/** `2026-10-10T01:00:00Z` plus `s` seconds, as GitHub stamps a row. */
+function second(s: number): string {
+  return new Date(Date.parse('2026-10-10T01:00:00Z') + s * 1000).toISOString().replace('.000Z', 'Z');
+}
+
+/**
+ * Serve `rows` as GitHub serves a `…Since` list: the rows updated at or after
+ * `since` (its own second included), oldest change first and then by id, 100
+ * to a page by offset, with `Link: rel="next"` while more follow. `rows` is
+ * read at each request, so a test can update a row between two of them.
+ */
+function serveSince(r: Rig, route: string, rows: { id: number; updated_at: string }[]): void {
+  r.fake.on(route, (req) => {
+    const since = Date.parse(String(req.query.since));
+    const page = Number(req.query.page ?? '1');
+    const match = rows
+      .filter((row) => Date.parse(row.updated_at) >= since)
+      .sort((a, b) => Date.parse(a.updated_at) - Date.parse(b.updated_at) || a.id - b.id);
+    const more = page * 100 < match.length;
+    return {
+      body: match.slice((page - 1) * 100, page * 100),
+      ...(more ? { headers: { link: `<${r.fake.baseUrl}${route.split(' ')[1]}?page=${page + 1}>; rel="next"` } } : {}),
+    };
+  });
+}
+
+const ISSUES = 'GET /repos/anima-research/rayforce/issues';
+
+test('a poll follows rel="next" past a short page', async () => {
+  // GitHub answered 99 rows and said more follow: the 99 are not the end.
+  const r = await rig();
+  r.fake.on(ISSUES, (req) =>
+    req.query.page === '1' && req.query.since === '2026-10-10T00:00:00Z'
+      ? {
+          body: Array.from({ length: 99 }, (_, i) => pagedIssue(1 + i, second(i))),
+          headers: { link: `<${r.fake.baseUrl}/x?page=2>; rel="next"` },
+        }
+      : { body: Array.from({ length: 50 }, (_, i) => pagedIssue(100 + i, second(99 + i))) },
+  );
+
+  const { rows, resumeAt } = await r.adapter.listIssuesSince(REPO, '2026-10-10T00:00:00Z');
+  assert.equal(rows.length, 149);
+  assert.equal(resumeAt, undefined);
+  assert.equal(r.fake.for(ISSUES).length, 2);
+});
+
+test('each request after the first asks from the last row it read, and keeps one copy of each row', async () => {
+  const r = await rig();
+  const all = Array.from({ length: 250 }, (_, i) => pagedIssue(1 + i, second(i)));
+  serveSince(r, ISSUES, all);
+
+  const { rows, resumeAt } = await r.adapter.listIssuesSince(REPO, '2026-10-10T00:00:00Z');
   assert.deepEqual(
-    r.fake.for('GET /repos/anima-research/rayforce/issues').map((c) => c.query.page),
-    ['1', '2', '3'],
+    r.fake.for(ISSUES).map((c) => [c.query.since, c.query.page]),
+    [
+      ['2026-10-10T00:00:00Z', '1'],
+      [second(99), '1'],
+      [second(198), '1'],
+    ],
+  );
+  // The last row of each page comes back first on the next one, and is kept once.
+  assert.deepEqual(
+    rows.map((row) => row.id),
+    all.map((row) => row.id),
+  );
+  assert.equal(resumeAt, undefined);
+});
+
+test('a row updated between two requests cannot push an unread row onto a page already read', async () => {
+  const r = await rig();
+  const all = Array.from({ length: 150 }, (_, i) => pagedIssue(1 + i, second(i)));
+  r.fake.on(ISSUES, (req, nth) => {
+    // Someone comments on #5 once page 1 has been read: it moves to the end.
+    if (nth === 1) all[4] = { ...all[4], updated_at: second(500) };
+    const since = Date.parse(String(req.query.since));
+    const page = Number(req.query.page ?? '1');
+    const match = all
+      .filter((row) => Date.parse(row.updated_at) >= since)
+      .sort((a, b) => Date.parse(a.updated_at) - Date.parse(b.updated_at));
+    const more = page * 100 < match.length;
+    return {
+      body: match.slice((page - 1) * 100, page * 100),
+      ...(more ? { headers: { link: `<${r.fake.baseUrl}/x?page=${page + 1}>; rel="next"` } } : {}),
+    };
+  });
+
+  const { rows } = await r.adapter.listIssuesSince(REPO, '2026-10-10T00:00:00Z');
+  const ids = new Set(rows.map((row) => row.id));
+  assert.deepEqual(
+    all.map((row) => row.id).filter((id) => !ids.has(id)),
+    [],
+    'every row is read, #101 included, which page 2 by offset would have skipped',
+  );
+  assert.equal(rows.find((row) => row.id === 5)?.updatedAt, second(500), 'the later copy of #5 is the one kept');
+});
+
+test('a read never stops inside a second, even past its request bound', async () => {
+  // 350 rows share one second: the read pages through it, then stops nowhere inside it.
+  const r = await rig();
+  const all = [
+    ...Array.from({ length: 350 }, (_, i) => pagedIssue(1 + i, second(1))),
+    ...Array.from({ length: 5 }, (_, i) => pagedIssue(400 + i, second(2 + i))),
+  ];
+  serveSince(r, ISSUES, all);
+
+  const { rows, resumeAt } = await r.adapter.listIssuesSince(REPO, '2026-10-10T00:00:00Z');
+  assert.equal(rows.length, 355);
+  assert.equal(resumeAt, undefined);
+  assert.deepEqual(
+    r.fake.for(ISSUES).map((c) => [c.query.since, c.query.page]),
+    [
+      ['2026-10-10T00:00:00Z', '1'],
+      [second(1), '1'],
+      [second(1), '2'],
+      [second(1), '3'],
+      [second(1), '4'],
+    ],
+  );
+});
+
+test('a Link header without rel="next" ends the read', async () => {
+  // GitHub's last page names only prev and first.
+  const r = await rig();
+  r.fake.on(ISSUES, (_req, nth) =>
+    nth === 0
+      ? {
+          body: Array.from({ length: 100 }, (_, i) => pagedIssue(1 + i, second(i))),
+          headers: { link: `<${r.fake.baseUrl}/x?page=1>; rel="prev", <${r.fake.baseUrl}/x?page=1>; rel="first"` },
+        }
+      : { body: [] },
+  );
+
+  const { rows } = await r.adapter.listIssuesSince(REPO, '2026-10-10T00:00:00Z');
+  assert.equal(rows.length, 100);
+  assert.equal(r.fake.for(ISSUES).length, 1);
+});
+
+test('both comment lists stop at the request bound and say where', async () => {
+  const r = await rig();
+  const comment = (id: number) => ({
+    ...COMMENT_PAYLOAD,
+    id,
+    updated_at: second(id - 1),
+    issue_url: 'https://api.github.com/repos/anima-research/rayforce/issues/7',
+    pull_request_url: 'https://api.github.com/repos/anima-research/rayforce/pulls/12',
+  });
+  const all = Array.from({ length: 350 }, (_, i) => comment(1 + i));
+  serveSince(r, 'GET /repos/anima-research/rayforce/issues/comments', all);
+  serveSince(r, 'GET /repos/anima-research/rayforce/pulls/comments', all);
+
+  for (const read of [
+    await r.adapter.listIssueCommentsSince(REPO, '2026-10-10T00:00:00Z'),
+    await r.adapter.listReviewCommentsSince(REPO, '2026-10-10T00:00:00Z'),
+  ]) {
+    assert.equal(read.resumeAt, second(297));
+    assert.equal(read.rows.length, 297);
+  }
+});
+
+test('a page with no stamp to read on from is followed by the next page of the same since', async () => {
+  const r = await rig();
+  r.fake.on(ISSUES, (req) =>
+    req.query.page === '1'
+      ? {
+          body: Array.from({ length: 100 }, (_, i) => ({ ...pagedIssue(1 + i, ''), updated_at: null })),
+          headers: { link: `<${r.fake.baseUrl}/x?page=2>; rel="next"` },
+        }
+      : { body: Array.from({ length: 3 }, (_, i) => pagedIssue(200 + i, second(i))) },
+  );
+
+  const { rows } = await r.adapter.listIssuesSince(REPO, '2026-10-10T00:00:00Z');
+  assert.equal(rows.length, 103);
+  assert.deepEqual(
+    r.fake.for(ISSUES).map((c) => [c.query.since, c.query.page]),
+    [
+      ['2026-10-10T00:00:00Z', '1'],
+      ['2026-10-10T00:00:00Z', '2'],
+    ],
+  );
+});
+
+test('a read the request bound stops leaves the second it stopped in for the next read', async () => {
+  const r = await rig();
+  const all = Array.from({ length: 350 }, (_, i) => pagedIssue(1 + i, second(i)));
+  serveSince(r, ISSUES, all);
+
+  const first = await r.adapter.listIssuesSince(REPO, '2026-10-10T00:00:00Z');
+  assert.equal(r.fake.for(ISSUES).length, POLL_MAX_PAGES);
+  // The third request ended at row 298's second, so that row waits for the next read.
+  assert.equal(first.resumeAt, second(297));
+  assert.deepEqual(
+    first.rows.map((row) => row.id),
+    all.slice(0, 297).map((row) => row.id),
   );
   assert.ok(
-    r.logs.some((l) => l.startsWith('warn poll page cap reached')),
-    'a capped poll says so rather than dropping rows silently',
+    r.logs.some((l) => l.startsWith('warn poll page cap reached; a later pass reads the rest from resumeAt')),
+    'a stopped read says so',
   );
+
+  const second2 = await r.adapter.listIssuesSince(REPO, first.resumeAt as string);
+  assert.deepEqual(
+    [...first.rows, ...second2.rows].map((row) => row.id),
+    all.map((row) => row.id),
+    'the two reads together return every row once',
+  );
+  assert.equal(second2.resumeAt, undefined);
+});
+
+/** A poller over a rig's adapter, its pass start set by `at`. */
+function pollerOver(r: Rig, state: GithubState, at: { now: string }, delivered: NormalizedEvent[]): Poller {
+  serveSince(r, 'GET /repos/anima-research/rayforce/issues/comments', []);
+  serveSince(r, 'GET /repos/anima-research/rayforce/pulls/comments', []);
+  return new Poller({
+    api: r.adapter,
+    repos: [REPO],
+    state,
+    intervalMs: 60_000,
+    logger: silentLogger(),
+    now: () => new Date(at.now),
+    onEvent: async (event) => {
+      delivered.push(event);
+    },
+  });
+}
+
+test('a pass the request bound stops is read on from where it stopped, and every row arrives once', async () => {
+  const r = await rig();
+  const all = Array.from({ length: 350 }, (_, i) => pagedIssue(1 + i, second(i)));
+  serveSince(r, ISSUES, all);
+  const state = GithubState.empty(null, silentLogger());
+  state.setLastPollAt('2026-10-10T00:00:00.000Z');
+  const at = { now: '2026-10-10T02:00:00.000Z' };
+  const delivered: NormalizedEvent[] = [];
+  const poller = pollerOver(r, state, at, delivered);
+
+  const first = await poller.pollOnce();
+  assert.equal(first.delivered.length, 297);
+  assert.deepEqual(state.pollCursors()['anima-research/rayforce:issues'], {
+    since: '2026-10-10T00:00:00.000Z',
+    resumeAt: second(297),
+  });
+  assert.deepEqual(state.pollCursors()['anima-research/rayforce:issue_comments'], { since: at.now });
+  assert.equal(state.lastPollAt(), second(297), 'every list has delivered what changed before the stop');
+
+  at.now = '2026-10-10T02:01:00.000Z';
+  const second2 = await poller.pollOnce();
+  assert.equal(
+    Date.parse(String(r.fake.for(ISSUES).at(-1)?.query.since)),
+    Date.parse(second(297)),
+    'the next pass asks from where the last stopped',
+  );
+  assert.equal(second2.delivered.length, 53);
+  assert.deepEqual(
+    delivered.map((e) => e.thread?.number),
+    all.map((row) => row.id),
+    'every row once, in order',
+  );
+  assert.deepEqual(state.pollCursors()['anima-research/rayforce:issues'], { since: at.now });
+  assert.equal(state.lastPollAt(), at.now);
+});
+
+test('a row changed later in the second a pass started in arrives next pass, and one opened then is opened once', async () => {
+  const r = await rig();
+  const all = [{ ...pagedIssue(1, '2026-10-10T02:00:00Z'), created_at: '2026-10-10T02:00:00Z' }];
+  serveSince(r, ISSUES, all);
+  const state = GithubState.empty(null, silentLogger());
+  state.setLastPollAt('2026-10-10T01:59:00.000Z');
+  const at = { now: '2026-10-10T02:00:00.700Z' };
+  const delivered: NormalizedEvent[] = [];
+  const poller = pollerOver(r, state, at, delivered);
+
+  await poller.pollOnce();
+  assert.deepEqual(delivered.map((e) => [e.thread?.number, e.kind]), [[1, 'issue.opened']]);
+  assert.deepEqual(state.pollCursors()['anima-research/rayforce:issues'], { since: '2026-10-10T02:00:00.000Z' });
+  assert.deepEqual(state.polledNew()['anima-research/rayforce:issues'], { '1': '2026-10-10T02:00:00Z' }, 'created inside the next window, so kept');
+
+  // Still inside that second, after the read: #2 changes. Then #1 is edited.
+  all.push(pagedIssue(2, '2026-10-10T02:00:00Z'));
+  all[0] = { ...all[0], body: 'edited', updated_at: '2026-10-10T02:00:30Z' };
+  at.now = '2026-10-10T02:01:00.000Z';
+  await poller.pollOnce();
+  assert.equal(r.fake.for(ISSUES).at(-1)?.query.since, '2026-10-10T02:00:00.000Z');
+  assert.deepEqual(
+    delivered.slice(1).map((e) => [e.thread?.number, e.kind]),
+    [
+      [2, 'issue.edited'],
+      [1, 'issue.edited'],
+    ],
+  );
+});
+
+test('across a stopped read, a row opened in the window is opened once', async () => {
+  const r = await rig();
+  const all: ReturnType<typeof pagedIssue>[] = Array.from({ length: 350 }, (_, i) => pagedIssue(1 + i, second(i)));
+  // #10 is opened in the window and read before the stop; #320 is opened in
+  // the window but changed again past the stop, so only the next pass reads it.
+  all[9] = { ...all[9], created_at: second(0) };
+  all[319] = { ...all[319], created_at: second(5) };
+  serveSince(r, ISSUES, all);
+  const state = GithubState.empty(null, silentLogger());
+  state.setLastPollAt('2026-10-10T00:00:00.000Z');
+  const at = { now: '2026-10-10T02:00:00.000Z' };
+  const delivered: NormalizedEvent[] = [];
+  const poller = pollerOver(r, state, at, delivered);
+
+  await poller.pollOnce();
+  assert.equal(delivered.find((e) => e.thread?.number === 10)?.kind, 'issue.opened');
+  assert.deepEqual(state.polledNew()['anima-research/rayforce:issues'], { '10': second(0) });
+
+  // #10 is edited before the next pass reads on.
+  all[9] = { ...all[9], body: 'edited', updated_at: second(400) };
+  at.now = '2026-10-10T02:01:00.000Z';
+  const next = await poller.pollOnce();
+  const kinds = Object.fromEntries(next.delivered.map((e) => [e.thread?.number, e.kind]));
+  assert.equal(kinds[320], 'issue.opened', 'opened in the window, though read after the stop');
+  assert.equal(kinds[10], 'issue.edited', 'already announced as opened, so not again');
 });
 
 test('a poll never reads more than the amendment’s 20 PR heads', async () => {
@@ -1055,7 +1364,7 @@ test('a poll never reads more than the amendment’s 20 PR heads', async () => {
     });
   }
 
-  const rows = await r.adapter.listIssuesSince(REPO, '2026-10-10T00:00:00Z');
+  const { rows } = await r.adapter.listIssuesSince(REPO, '2026-10-10T00:00:00Z');
   assert.equal(rows.filter((row) => row.headSha !== undefined).length, POLL_PR_HEAD_LIMIT);
 });
 
@@ -1077,14 +1386,14 @@ test('the comment polls carry the issue or pull number the comment hangs on', as
     ],
   });
 
-  const issueComments = await r.adapter.listIssueCommentsSince(REPO, since);
+  const { rows: issueComments } = await r.adapter.listIssueCommentsSince(REPO, since);
   assert.equal(issueComments.length, 1);
   assert.equal(issueComments[0].number, 7);
   assert.equal(issueComments[0].path, undefined);
   assert.equal(r.fake.for('GET /repos/anima-research/rayforce/issues/comments')[0].query.sort, 'updated');
   assert.equal(r.fake.for('GET /repos/anima-research/rayforce/issues/comments')[0].query.since, since);
 
-  const reviewComments = await r.adapter.listReviewCommentsSince(REPO, since);
+  const { rows: reviewComments } = await r.adapter.listReviewCommentsSince(REPO, since);
   assert.equal(reviewComments[0].number, 12);
   assert.equal(reviewComments[0].path, 'src/a.ts');
   assert.equal(reviewComments[0].inReplyTo, 555);
@@ -1280,6 +1589,50 @@ test('a single complete page still stops at one request', async () => {
   assert.equal(summary.conclusion, 'success');
   assert.equal(summary.total, 2);
   assert.equal(r.fake.for(`GET /repos/anima-research/rayforce/commits/${HEAD_SHA}/check-runs`).length, 1);
+});
+
+test('getCheckRuns reads on past a short page while total_count says more runs follow', async () => {
+  const r = await rig();
+  r.fake.on(`GET /repos/anima-research/rayforce/commits/${HEAD_SHA}/check-runs`, (req) => ({
+    body: {
+      total_count: 100,
+      check_runs:
+        Number(req.query.page) === 1
+          ? successRuns(0, 99)
+          : [{ name: 'late-failure', status: 'completed', conclusion: 'failure', html_url: 'https://ci/late' }],
+    },
+  }));
+
+  const summary = await r.adapter.getCheckRuns(REPO, HEAD_SHA);
+  assert.equal(summary.conclusion, 'failure', 'a page of 99 was not the last');
+  assert.equal(r.fake.for(`GET /repos/anima-research/rayforce/commits/${HEAD_SHA}/check-runs`).length, 2);
+});
+
+test('getCheckRuns without a total_count reads on past a full page', async () => {
+  const r = await rig();
+  r.fake.on(`GET /repos/anima-research/rayforce/commits/${HEAD_SHA}/check-runs`, (req) => ({
+    body: {
+      check_runs:
+        Number(req.query.page) === 1
+          ? successRuns(0, 100)
+          : [{ name: 'late-failure', status: 'completed', conclusion: 'failure', html_url: 'https://ci/late' }],
+    },
+  }));
+
+  const summary = await r.adapter.getCheckRuns(REPO, HEAD_SHA);
+  assert.equal(summary.conclusion, 'failure');
+  assert.equal(r.fake.for(`GET /repos/anima-research/rayforce/commits/${HEAD_SHA}/check-runs`).length, 2);
+});
+
+test('getCheckRuns without a total_count is undecided when the page bound stops it', async () => {
+  const r = await rig();
+  r.fake.on(`GET /repos/anima-research/rayforce/commits/${HEAD_SHA}/check-runs`, (req) => ({
+    body: { check_runs: successRuns((Number(req.query.page) - 1) * 100, 100) },
+  }));
+
+  const summary = await r.adapter.getCheckRuns(REPO, HEAD_SHA);
+  assert.equal(summary.conclusion, null, 'what was not read cannot be called green');
+  assert.equal(r.fake.for(`GET /repos/anima-research/rayforce/commits/${HEAD_SHA}/check-runs`).length, 5);
 });
 
 test('summarizeChecks refuses to call a truncated read success', () => {

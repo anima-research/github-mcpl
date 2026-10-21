@@ -353,8 +353,9 @@ export interface PolledIssue {
   author: EventActor;
   /**
    * When the row was opened (amendment 2a). A `since` query says only *that* a
-   * row changed; comparing this against the cursor the pass queried with is
-   * what tells an opened issue from an edited one.
+   * row changed; comparing this against the start of its list's window
+   * (`PollCursor.since`), for a row not yet announced as new, is what tells
+   * an opened issue from an edited one.
    */
   createdAt: string;
   updatedAt: string;
@@ -380,6 +381,36 @@ export interface PolledComment {
   /** Review comments only. */
   path?: string;
   inReplyTo?: number;
+}
+
+/** One read of a poll list: its rows, and where a read the page bound stopped. */
+export interface PollRead<T> {
+  rows: T[];
+  /**
+   * Set when the read stopped before the end of the list: the `updated_at`
+   * second it stopped in. The rows of that second and later were left for
+   * the next read, which asks from here.
+   */
+  resumeAt?: string;
+}
+
+/**
+ * Where one poll list (a repository's issues, its issue comments or its
+ * review comments) reads from, keyed `<owner>/<name>:<list>`.
+ */
+export interface PollCursor {
+  /**
+   * The start of the window this list has not finished: the start of the
+   * last pass that read it to the end with every delivery accepted, in whole
+   * seconds. A row created at or after it is new (amendment 2a), unless
+   * `pollNew` says it was announced as new already.
+   */
+  since: string;
+  /**
+   * Set while a read the page bound stopped is being caught up: the second
+   * it stopped in, which the next read asks from instead of `since`.
+   */
+  resumeAt?: string;
 }
 
 export interface BotIdentity {
@@ -425,11 +456,11 @@ export interface GitHubApi {
 
   // ── Polling fallback (amendment 1) and identity ──
   /** `GET /repos/{o}/{r}/issues?state=all&sort=updated&since=`: issues and PRs. */
-  listIssuesSince(repo: RepoRef, since: string): Promise<PolledIssue[]>;
+  listIssuesSince(repo: RepoRef, since: string): Promise<PollRead<PolledIssue>>;
   /** `GET /repos/{o}/{r}/issues/comments?sort=updated&since=`. */
-  listIssueCommentsSince(repo: RepoRef, since: string): Promise<PolledComment[]>;
+  listIssueCommentsSince(repo: RepoRef, since: string): Promise<PollRead<PolledComment>>;
   /** `GET /repos/{o}/{r}/pulls/comments?sort=updated&since=`. */
-  listReviewCommentsSince(repo: RepoRef, since: string): Promise<PolledComment[]>;
+  listReviewCommentsSince(repo: RepoRef, since: string): Promise<PollRead<PolledComment>>;
   getAuthenticatedBot(): Promise<BotIdentity>;
 }
 
@@ -840,7 +871,29 @@ export interface StateSnapshot {
   current: string | null;
   created: Record<string, CreatedComment[]>;
   edited: Record<string, EditedComment[]>;
+  /**
+   * Every list of the repositories polled has delivered what changed before
+   * this: the start of the last pass whose every delivery was accepted, or
+   * where a read it stopped stopped, if earlier; before any pass has
+   * delivered, the window the first pass read. A list with no cursor of its
+   * own in `pollCursors` starts here, such as one of a repository newly in
+   * GITHUB_REPOS, or every list of a state file written before `pollCursors`
+   * existed. Read as a whole second.
+   */
   lastPollAt: string | null;
+  /**
+   * Each poll list's own cursor, for the repositories the last pass read.
+   * **Additive**: a state file without it is still a valid version-1 snapshot.
+   */
+  pollCursors: Record<string, PollCursor>;
+  /**
+   * Per list, the rows announced as new (id → created_at), so a row read
+   * again inside its list's window, after a stopped read, a refused delivery
+   * or in the second a pass started in, is not announced as new twice.
+   * Written when the row's event is accepted, and pruned to the rows created
+   * inside the window when a pass delivers. **Additive**, like `pollCursors`.
+   */
+  pollNew: Record<string, Record<string, string>>;
   /** Ring of the last {@link POLL_DEDUP_RING} `<kind>:<id>:<updated_at>` keys (amendment 1). */
   pollKeys: string[];
   /**
@@ -885,6 +938,13 @@ export interface StateStore {
   checkpointStatus(checkpointId: string): CheckpointStatus;
   lastPollAt(): string | null;
   setLastPollAt(when: string): void;
+  /** Each poll list's own cursor, keyed `<owner>/<name>:<list>`. */
+  pollCursors(): Readonly<Record<string, PollCursor>>;
+  /** Replace them all: a list left out has no cursor of its own. */
+  setPollCursors(cursors: Record<string, PollCursor>): void;
+  /** Per list, the rows announced as new in its window (`StateSnapshot.pollNew`). */
+  polledNew(): Readonly<Record<string, Record<string, string>>>;
+  setPolledNew(rows: Record<string, Record<string, string>>): void;
   /** True when the key was already seen; otherwise records it in the ring and returns false. */
   seenPollKey(key: string): boolean;
   /**

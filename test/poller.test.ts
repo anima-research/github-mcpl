@@ -27,6 +27,7 @@ import {
   POLL_DEDUP_RING,
   type ChecksSummary,
   type NormalizedEvent,
+  type PollCursor,
   type RepoRef,
   type StateStore,
 } from '../src/types.js';
@@ -76,6 +77,26 @@ class MemoryIngressState implements IngressState {
 
   snapshot(): { pollKeys: string[] } {
     return { pollKeys: [...this.keys] };
+  }
+
+  cursors: Record<string, PollCursor> = {};
+
+  pollCursors(): Readonly<Record<string, PollCursor>> {
+    return this.cursors;
+  }
+
+  setPollCursors(cursors: Record<string, PollCursor>): void {
+    this.cursors = { ...cursors };
+  }
+
+  fresh: Record<string, Record<string, string>> = {};
+
+  polledNew(): Readonly<Record<string, Record<string, string>>> {
+    return this.fresh;
+  }
+
+  setPolledNew(rows: Record<string, Record<string, string>>): void {
+    this.fresh = rows;
   }
 }
 
@@ -600,6 +621,7 @@ test('a row already in the gate is not delivered twice', async () => {
   // marker as an eviction would: now the gate, and not the cursor or the
   // marker, is the only thing that can stop the duplicate.
   r.state.setLastPollAt('2026-10-13T00:00:00.000Z');
+  r.state.setPollCursors({});
   r.state.heads.clear();
   const second = await r.poller.pollOnce();
   assert.deepEqual(second.delivered, []);
@@ -773,9 +795,167 @@ test('IngressState is a structural subset of the frozen StateStore', () => {
 
   // And a runtime one, over the member names the poller actually calls.
   const state = new MemoryIngressState();
-  for (const member of ['lastPollAt', 'setLastPollAt', 'seenPollKey', 'snapshot'] as const) {
+  for (const member of ['lastPollAt', 'setLastPollAt', 'pollCursors', 'setPollCursors', 'polledNew', 'setPolledNew', 'seenPollKey', 'snapshot'] as const) {
     assert.equal(typeof state[member], 'function', member);
   }
+});
+
+test('each list starts from lastPollAt until it has a cursor of its own, then keeps it', async () => {
+  // A state file from before per-list cursors carries `lastPollAt` alone, and
+  // one cursor for a repository no longer polled.
+  const r = rig({ cursor: '2026-10-13T00:00:00.000Z', repos: [TEST_REPO, OTHER_REPO] });
+  r.state.setPollCursors({ 'gone/repo:issues': { since: '2026-10-01T00:00:00.000Z' } });
+
+  await r.poller.pollOnce();
+  const asked = () => r.api.calls.filter((c) => String(c.method).endsWith('Since')).map((c) => c.args[1]);
+  assert.deepEqual(asked(), Array(6).fill('2026-10-13T00:00:00.000Z'));
+  const start = '2026-10-14T00:00:00.000Z';
+  assert.deepEqual(r.state.pollCursors(), {
+    'anima-research/rayforce:issues': { since: start },
+    'anima-research/rayforce:issue_comments': { since: start },
+    'anima-research/rayforce:review_comments': { since: start },
+    'other-org/other-repo:issues': { since: start },
+    'other-org/other-repo:issue_comments': { since: start },
+    'other-org/other-repo:review_comments': { since: start },
+  });
+
+  // A list catching up reads from where it stopped; the others from their own.
+  r.state.setPollCursors({
+    ...r.state.pollCursors(),
+    'anima-research/rayforce:issues': { since: '2026-10-13T00:00:00.000Z', resumeAt: '2026-10-13T06:00:00Z' },
+  });
+  r.api.calls.length = 0;
+  await r.poller.pollOnce();
+  assert.deepEqual(asked(), ['2026-10-13T06:00:00.000Z', start, start, start, start, start]);
+});
+
+test('a failed delivery leaves every list’s cursor where it was', async () => {
+  const api = new FakeGitHubApi();
+  api.seedIssue({ updatedAt: '2026-10-13T12:00:00.000Z' });
+  const r = rig({
+    api,
+    onEvent: () => {
+      throw new Error('host refused the event');
+    },
+  });
+  const before = { 'anima-research/rayforce:issues': { since: '2026-10-13T00:00:00.000Z', resumeAt: '2026-10-13T06:00:00Z' } };
+  r.state.setPollCursors(before);
+
+  const result = await r.poller.pollOnce();
+  assert.equal(result.failed, 1);
+  assert.deepEqual(r.state.pollCursors(), before);
+});
+
+test('a refused pass keeps the rows it announced as new, so a retry does not open them again', async () => {
+  const api = new FakeGitHubApi();
+  const issue = api.seedIssue({ number: 41, createdAt: '2026-10-13T12:00:00.000Z', updatedAt: '2026-10-13T12:00:00.000Z' });
+  const pull = api.seedPullRequest({ number: 58, createdAt: '2026-10-13T12:00:00.000Z', updatedAt: '2026-10-13T12:00:00.000Z' });
+  api.seedComment({ repo: TEST_REPO, number: 41, kind: 'issue' }, { id: 7001, updatedAt: '2026-10-13T12:00:01.000Z' });
+  let refusals = 0;
+  const r = rig({
+    api,
+    onEvent: (event) => {
+      if (event.kind === 'comment.created' && refusals++ === 0) throw new Error('host refused the event');
+    },
+  });
+
+  const first = await r.poller.pollOnce();
+  assert.deepEqual(first.delivered.map((e) => e.kind).sort(), ['issue.opened', 'pull.opened']);
+  assert.equal(first.cursorAdvanced, false);
+  assert.deepEqual(r.state.fresh, {
+    'anima-research/rayforce:issues': { '41': '2026-10-13T12:00:00.000Z', '58': '2026-10-13T12:00:00.000Z' },
+  });
+
+  // Both change before the retry: the issue is edited, the pull request pushed.
+  issue.body = 'edited';
+  issue.updatedAt = '2026-10-13T13:00:00.000Z';
+  pull.head = { ...pull.head, sha: 'f'.repeat(40) };
+  pull.updatedAt = '2026-10-13T13:00:00.000Z';
+  const second = await r.poller.pollOnce();
+  assert.deepEqual(second.delivered.map((e) => e.kind).sort(), ['comment.created', 'issue.edited', 'pull.synchronize']);
+  // The pass delivered, and its window starts after both were created.
+  assert.deepEqual(r.state.fresh, {});
+});
+
+test('a refused opening leaves nothing remembered, so its retry announces it as opened', async () => {
+  const api = new FakeGitHubApi();
+  api.seedIssue({ number: 41, createdAt: '2026-10-13T12:00:00.000Z', updatedAt: '2026-10-13T12:00:00.000Z' });
+  let refusals = 0;
+  const r = rig({
+    api,
+    onEvent: (event) => {
+      if (event.kind === 'issue.opened' && refusals++ === 0) throw new Error('host refused the event');
+    },
+  });
+
+  await r.poller.pollOnce();
+  assert.deepEqual(r.state.fresh, {});
+  const second = await r.poller.pollOnce();
+  assert.deepEqual(second.delivered.map((e) => e.kind), ['issue.opened']);
+});
+
+test('lastPollAt is the earliest place a list stopped, and never past the pass start', async () => {
+  const api = new FakeGitHubApi();
+  const r = rig({ api });
+  api.listIssuesSince = async () => ({ rows: [], resumeAt: '2026-10-13T08:00:00Z' });
+  api.listIssueCommentsSince = async () => ({ rows: [], resumeAt: '2026-10-13T07:00:00Z' });
+  await r.poller.pollOnce();
+  assert.equal(r.state.lastPollAt(), '2026-10-13T07:00:00Z');
+
+  // A stop stamped after the pass started, as a row changed during it can be.
+  api.listIssuesSince = async () => ({ rows: [] });
+  api.listIssueCommentsSince = async () => ({ rows: [], resumeAt: '2026-10-14T00:00:05Z' });
+  await r.poller.pollOnce();
+  assert.equal(r.state.lastPollAt(), '2026-10-14T00:00:00.000Z');
+});
+
+test('a first pass whose read throws keeps the window it read', async () => {
+  const api = new FakeGitHubApi();
+  // The very first read throws, so the window must be kept before any read.
+  api.listIssuesSince = async () => {
+    throw new Error('GitHub 502 on the comment page');
+  };
+  const r = rig({ api, cursor: null, now: '2026-10-14T00:00:00.700Z' });
+  await assert.rejects(() => r.poller.pollOnce(), /502 on the comment page/);
+  assert.equal(r.state.lastPollAt(), '2026-10-13T23:59:00.000Z');
+});
+
+test('a stored position with milliseconds is read from its whole second', async () => {
+  const r = rig({ cursor: '2026-10-13T00:00:00.700Z' });
+  r.state.setPollCursors({
+    'anima-research/rayforce:issues': { since: '2026-10-13T00:00:00.000Z', resumeAt: '2026-10-13T06:00:00.300Z' },
+    'anima-research/rayforce:issue_comments': { since: '2026-10-13T00:00:00.500Z' },
+  });
+  await r.poller.pollOnce();
+  assert.deepEqual(
+    r.api.calls.filter((c) => String(c.method).endsWith('Since')).map((c) => c.args[1]),
+    ['2026-10-13T06:00:00.000Z', '2026-10-13T00:00:00.000Z', '2026-10-13T00:00:00.000Z'],
+  );
+});
+
+test('cursors are whole seconds, so the second a pass starts in is read again', async () => {
+  const r = rig({ now: '2026-10-14T00:00:00.700Z' });
+  await r.poller.pollOnce();
+  assert.equal(r.state.lastPollAt(), '2026-10-14T00:00:00.000Z');
+  assert.deepEqual(r.state.pollCursors()['anima-research/rayforce:issues'], { since: '2026-10-14T00:00:00.000Z' });
+});
+
+test('a refused first pass keeps the window it read', async () => {
+  const api = new FakeGitHubApi();
+  api.seedIssue({ number: 41, updatedAt: '2026-10-13T23:59:30.000Z' });
+  const r = rig({
+    api,
+    cursor: null,
+    now: '2026-10-14T00:00:00.700Z',
+    onEvent: () => {
+      throw new Error('host refused the event');
+    },
+  });
+
+  const first = await r.poller.pollOnce();
+  assert.equal(first.failed, 1);
+  assert.equal(first.since, '2026-10-13T23:59:00.000Z', 'one interval back, in whole seconds');
+  assert.equal(r.state.lastPollAt(), first.since, 'the retry asks from the same start, not one moved on by the clock');
 });
 
 test('the gate the state keeps is bounded by the contract POLL_DEDUP_RING', async () => {
@@ -817,7 +997,7 @@ test('a transient lookup failure is retried on the next pass, after the cursor m
   // Pass two: the cursor has moved past the row, so `listIssuesSince` returns
   // nothing — the backlog is the only reason the checks are asked about again.
   const second = await r.poller.pollOnce();
-  assert.deepEqual(await api.listIssuesSince(TEST_REPO, r.state.lastPollAt() as string), []);
+  assert.deepEqual((await api.listIssuesSince(TEST_REPO, r.state.lastPollAt() as string)).rows, []);
   assert.deepEqual(
     second.delivered.map((e) => e.kind),
     ['checks.completed'],
@@ -1071,7 +1251,7 @@ test('a checks event refused long after the cursor moved past its row is still r
   // From here on the pull-request row is behind the cursor: the backlog is
   // the only thing that can produce this checks event.
   const cursor = r.state.lastPollAt() as string;
-  assert.deepEqual(await api.listIssuesSince(TEST_REPO, cursor), []);
+  assert.deepEqual((await api.listIssuesSince(TEST_REPO, cursor)).rows, []);
 
   // Pass two: the checks settle and the listener refuses.
   settled = true;

@@ -536,7 +536,9 @@ test('amendment 2a: a polled pull-request row with an unmoved head never reaches
   // `receivedAt`, which is the real clock here, and these rows are stamped in
   // the fixture's past. The pass under test is "the second time this poller
   // sees this pull request", and that is what the head record carries.
+  // Each list's own cursor is cleared, so every list starts from it.
   state.setLastPollAt('2026-10-13T13:00:00.000Z');
+  state.setPollCursors({});
   await poller.pollOnce();
   await until(() => pushes(h).length === afterFirst + 1, 'the comment, and nothing else');
   assert.equal((pushes(h)[afterFirst].origin as { kind: string }).kind, 'comment.created');

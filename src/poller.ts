@@ -17,11 +17,16 @@
  *   - **Record only after delivery.** The dedup ring is read once per pass
  *     and a key is written back only once its event has been handed to the
  *     listener without throwing, so a failed delivery is re-attempted on the
- *     next pass instead of being silently consumed. The cursor advances for
+ *     next pass instead of being silently consumed. The cursors advance for
  *     the same reason: only when the whole pass delivered.
+ *
+ * Each repository's three lists keep a cursor of their own
+ * ({@link PollCursor}), so a list whose read the page bound stopped reads on
+ * from where it stopped, while the rest move to the start of the pass.
  */
 
 import {
+  atOrAfter,
   CheckGate,
   checkMarkOf,
   checksPollKey,
@@ -44,6 +49,8 @@ import {
   type NormalizedEvent,
   type PolledComment,
   type PolledIssue,
+  type PollCursor,
+  type PollRead,
   type RepoRef,
   type ThreadRef,
 } from './types.js';
@@ -91,6 +98,13 @@ export type PollerApi = Pick<
 export interface IngressState {
   lastPollAt(): string | null;
   setLastPollAt(when: string): void;
+  /** Each list's own cursor, keyed by {@link pollCursorKey}. */
+  pollCursors(): Readonly<Record<string, PollCursor>>;
+  /** Replace them all: a list left out starts from `lastPollAt` next time. */
+  setPollCursors(cursors: Record<string, PollCursor>): void;
+  /** Per list, the rows announced as new in its window, id → created_at. */
+  polledNew(): Readonly<Record<string, Record<string, string>>>;
+  setPolledNew(rows: Record<string, Record<string, string>>): void;
   /** Records `key` in the ring and reports whether it was already there. */
   seenPollKey(key: string): boolean;
   /** The head sha the last pass recorded for this pull request, or null. */
@@ -122,9 +136,21 @@ export interface PollerOptions {
   checkGate?: CheckGate;
 }
 
+/** The three lists the poller reads from each repository. */
+export type PollList = 'issues' | 'issue_comments' | 'review_comments';
+
+/** `<owner>/<name>:<list>`, the key of a list's cursor in the state. */
+export function pollCursorKey(repo: RepoRef, list: PollList): string {
+  return `${repoSlug(repo)}:${list}`;
+}
+
 /** What one pass did, for the caller's diagnostics and for the tests. */
 export interface PollResult {
-  /** The `since` the pass queried with. */
+  /**
+   * The start of a list with no cursor of its own: the stored `lastPollAt`
+   * as kept, or one interval back in whole seconds. The list asks GitHub from
+   * its whole second.
+   */
   since: string;
   /** Events handed to the listener, in order. */
   delivered: NormalizedEvent[];
@@ -132,7 +158,10 @@ export interface PollResult {
   duplicates: number;
   /** Events whose listener threw; their keys were not recorded. */
   failed: number;
-  /** Whether the cursor was advanced to the start of this pass. */
+  /**
+   * Whether the cursors moved: each list's to the start of this pass, or, for
+   * a read the page bound stopped, to where it stopped.
+   */
   cursorAdvanced: boolean;
   /** `getCheckRuns` calls this pass made; never above the cap. */
   checkLookups: number;
@@ -188,6 +217,26 @@ interface Candidate {
    * at collection time loses nothing.
    */
   head?: { channel: string; sha: string };
+  /**
+   * An issue row announced as new, remembered in `pollNew` on the same terms
+   * as {@link Candidate.head}, so a refused pass's accepted openings stay
+   * remembered when the retry reads them again.
+   */
+  fresh?: { list: string; id: string; createdAt: string };
+}
+
+/**
+ * An instant as a whole second, in the cursor's form. GitHub stamps rows to
+ * the second, and a `since` part way through a second leaves out the rows
+ * stamped in it.
+ */
+function wholeSecond(ms: number): string {
+  return new Date(Math.floor(ms / 1000) * 1000).toISOString();
+}
+
+/** A stored position as a whole second, whatever spelling or precision it was kept in. */
+function atSecond(iso: string): string {
+  return wholeSecond(Date.parse(iso));
 }
 
 export class Poller {
@@ -303,26 +352,37 @@ export class Poller {
    * One pass: query every allow-listed repository since the cursor, drain as
    * much of the check backlog as the per-pass cap allows, drop what the dedup
    * ring already holds, deliver the rest oldest-first, record each key after
-   * its delivery, and advance the cursor if no delivery failed.
+   * its delivery, and advance the cursors if no delivery failed.
    *
    * A failed *lookup* does not hold the cursor back: the head stays in the
    * backlog instead, which is the thing that gets retried. A failed
    * *delivery* does hold it back, so its row is queried again.
    *
    * For that retry to mean anything, nothing a refused event would be
-   * recognised by on the next pass may be written before it is accepted. Two
-   * things are therefore committed inside the delivery loop and nowhere else:
-   * the dedup key, and the pull-request head a `pull.synchronize` announces
-   * ({@link Candidate.head}).
+   * recognised by on the next pass may be written before it is accepted.
+   * Three things are therefore committed inside the delivery loop and nowhere
+   * else: the dedup key, the pull-request head a `pull.synchronize` announces
+   * ({@link Candidate.head}), and a row announced as new ({@link Candidate.fresh}).
    */
   async pollOnce(): Promise<PollResult> {
     const startedAt = this.now();
-    const since = this.state.lastPollAt() ?? new Date(startedAt.getTime() - this.effectiveIntervalMs).toISOString();
+    const stored = this.state.lastPollAt();
+    const since = stored ?? wholeSecond(startedAt.getTime() - this.effectiveIntervalMs);
+    // A first pass keeps the window it reads before it reads, so however the
+    // pass ends, refused or thrown, the next asks from the same start rather
+    // than one the clock has moved on.
+    if (stored === null) this.state.setLastPollAt(since);
     const receivedAt = startedAt.toISOString();
+    // Where a list read to the end starts next: this pass's start, so a row
+    // changed after its read is asked for, in whole seconds, so its second is too.
+    const startSecond = wholeSecond(startedAt.getTime());
 
     const candidates: Candidate[] = [];
+    // Where each list reads from next, written only if the pass delivers. A
+    // repository no longer in GITHUB_REPOS drops out of it.
+    const cursors: Record<string, PollCursor> = {};
     for (const repo of this.repos) {
-      candidates.push(...(await this.collectRows(repo, since, receivedAt)));
+      candidates.push(...(await this.collectRows(repo, since, startSecond, receivedAt, cursors)));
     }
     // One drain for every repository together, so the cap is a cap on the
     // pass and not on each repository in turn.
@@ -355,6 +415,12 @@ export class Poller {
       // event, or the ring says an earlier pass already got it through.
       const commitHead = (): void => {
         if (candidate.head) this.state.setPolledHead(candidate.head.channel, candidate.head.sha);
+        if (candidate.fresh) {
+          const { list, id, createdAt } = candidate.fresh;
+          const all = { ...this.state.polledNew() };
+          all[list] = { ...all[list], [id]: createdAt };
+          this.state.setPolledNew(all);
+        }
       };
 
       if (alreadySeen.has(candidate.key) || deliveredThisPass.has(candidate.key)) {
@@ -402,7 +468,20 @@ export class Poller {
     result.checksBacklog = this.backlog.size;
 
     if (result.failed === 0) {
-      this.state.setLastPollAt(receivedAt);
+      this.state.setPollCursors(cursors);
+      // Every list has delivered what changed before this pass's start, or
+      // before where a stopped read stopped, whichever is earlier.
+      const stops = Object.values(cursors).flatMap((cursor) => cursor.resumeAt ?? []);
+      this.state.setLastPollAt([startSecond, ...stops].reduce((a, b) => (Date.parse(b) < Date.parse(a) ? b : a)));
+      // A row stays remembered as announced new while it is created inside its
+      // list's window, the only rows the window's start would call new again.
+      const remembered: Record<string, Record<string, string>> = {};
+      for (const [list, rows] of Object.entries(this.state.polledNew())) {
+        const window = cursors[list]?.since;
+        const kept = Object.entries(rows).filter(([, createdAt]) => window !== undefined && atOrAfter(createdAt, window));
+        if (kept.length > 0) remembered[list] = Object.fromEntries(kept);
+      }
+      this.state.setPolledNew(remembered);
       result.cursorAdvanced = true;
     } else {
       this.logger.warn('poll cursor held back: a delivery failed in this pass', {
@@ -425,20 +504,45 @@ export class Poller {
 
   /**
    * The issue, comment and review-comment rows one repository changed since
-   * the cursor. Every open pull-request head it saw is *enqueued* for a check
-   * lookup rather than looked up here, so the cap and the retries belong to
-   * the backlog and not to one repository's turn.
+   * each list's cursor. Every open pull-request head it saw is *enqueued* for
+   * a check lookup rather than looked up here, so the cap and the retries
+   * belong to the backlog and not to one repository's turn.
+   *
+   * Each list's next cursor goes into `next`: the start of this pass when
+   * the read reached the end of the list, and otherwise where it stopped,
+   * with the window's start kept, since the rows past the stop are still
+   * to be read.
    */
-  private async collectRows(repo: RepoRef, since: string, receivedAt: string): Promise<Candidate[]> {
+  private async collectRows(
+    repo: RepoRef,
+    fallback: string,
+    startSecond: string,
+    receivedAt: string,
+    next: Record<string, PollCursor>,
+  ): Promise<Candidate[]> {
+    const cursors = this.state.pollCursors();
+    const read = async <T>(list: PollList, ask: (from: string) => Promise<PollRead<T>>) => {
+      const key = pollCursorKey(repo, list);
+      // Stored positions are read as whole seconds, so one kept with
+      // milliseconds, as by a release before this, starts at its second.
+      const since = atSecond(cursors[key]?.since ?? fallback);
+      const stop = cursors[key]?.resumeAt;
+      const { rows, resumeAt } = await ask(stop === undefined ? since : atSecond(stop));
+      next[key] = resumeAt === undefined ? { since: startSecond } : { since, resumeAt };
+      return { rows, since, key };
+    };
     const out: Candidate[] = [];
 
-    const issues = await this.api.listIssuesSince(repo, since);
-    for (const row of issues) {
+    const issues = await read('issues', (from) => this.api.listIssuesSince(repo, from));
+    const announced = this.state.polledNew()[issues.key] ?? {};
+    for (const row of issues.rows) {
       // What the last pass recorded for this thread (amendment 2a for a pull
       // request's head, a state-and-text fingerprint for an issue) turns a
       // real change into an event and drops the row a comment only bumped.
       const channel = channelId({ repo, number: row.number, kind: row.isPullRequest ? 'pull' : 'issue' });
-      const event = normalizePolledIssue(repo, row, receivedAt, since, this.state.polledHead(channel) ?? undefined);
+      const seen = announced[String(row.id)] !== undefined;
+      const event = normalizePolledIssue(repo, row, receivedAt, issues.since, this.state.polledHead(channel) ?? undefined, seen);
+      const fresh = !seen && atOrAfter(row.createdAt, issues.since);
       const marker = polledMarker(row);
       const openHead = row.isPullRequest && row.state === 'open' && row.headSha ? row.headSha : undefined;
       if (event) {
@@ -452,6 +556,7 @@ export class Poller {
           event,
           at: row.updatedAt,
           ...(marker === undefined ? {} : { head: { channel, sha: marker } }),
+          ...(fresh ? { fresh: { list: issues.key, id: String(row.id), createdAt: row.createdAt } } : {}),
         });
       } else if (marker !== undefined) {
         // No event: this row was dropped *because* the marker is unchanged, so
@@ -464,10 +569,10 @@ export class Poller {
       if (openHead !== undefined) this.enqueueHead(repo, row);
     }
 
-    out.push(...this.commentCandidates(repo, await this.api.listIssueCommentsSince(repo, since), 'issue_comment', receivedAt));
-    out.push(
-      ...this.commentCandidates(repo, await this.api.listReviewCommentsSince(repo, since), 'review_comment', receivedAt),
-    );
+    const comments = await read('issue_comments', (from) => this.api.listIssueCommentsSince(repo, from));
+    out.push(...this.commentCandidates(repo, comments.rows, 'issue_comment', receivedAt));
+    const reviewComments = await read('review_comments', (from) => this.api.listReviewCommentsSince(repo, from));
+    out.push(...this.commentCandidates(repo, reviewComments.rows, 'review_comment', receivedAt));
 
     return out;
   }

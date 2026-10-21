@@ -33,7 +33,11 @@ camel case, so a reviewer can map a contract bullet to a type by sight.
   `issues?state=all&sort=updated&since=`), `listIssueCommentsSince`
   (`issues/comments?sort=updated&since=`) and `listReviewCommentsSince`
   (`pulls/comments?sort=updated&since=`), returning `PolledIssue` /
-  `PolledComment` rows. The poller (.3) keeps the cursor `lastPollAt`, dedups
+  `PolledComment` rows, each list read by `updated_at` rather than by page
+  offset, three requests a pass and more only to finish a second. The poller
+  (.3) keeps a cursor for each repository's list in whole seconds
+  (`pollCursors`, starting from `lastPollAt` until it has its own), which a
+  read stopped at that bound leaves where it stopped, dedups
   with the key `<kind>:<id>:<updated_at>` through `StateStore.seenPollKey`
   (ring of `POLL_DEDUP_RING` = 2000 keys, .7), names poll events
   `poll:<kind>:<id>:<updated_at>`, and asks `getCheckRuns` for the heads of
@@ -45,11 +49,17 @@ camel case, so a reviewer can map a contract bullet to a type by sight.
   and a recipe keyed on `github:issue=opened` could never fire on it (found by
   the WP10 end-to-end run). A `since` query still carries no action, but it
   does carry `created_at`, and that is enough: `PolledIssue` gains `createdAt`
-  and `normalizePolledIssue(repo, row, receivedAt, since, previousHeadSha?)`
+  and `normalizePolledIssue(repo, row, receivedAt, since, previousHeadSha?, announced?)`
   derives the kind from it.
-  - An **issue** row created at or after `since` is `issue.opened`; otherwise
-    `issue.edited`, as before. Closed rows stay `issue.closed`.
-  - A **pull-request** row created at or after `since` is `pull.opened`. An
+  - An **issue** row created at or after `since`, and not announced as new
+    already (`announced`), is `issue.opened`; otherwise
+    `issue.edited`, as before. Closed rows stay `issue.closed`. `since` is
+    the start of the list's window, which stays put while a stopped read is
+    caught up. The state also keeps the rows announced as new while their
+    `created_at` is inside the window (`pollNew`), so a row read again there
+    is not opened twice.
+  - A **pull-request** row created at or after `since`, and not announced
+    as new already, is `pull.opened`. An
     open row seen again is `pull.synchronize` when its head sha moved away
     from the one the last pass recorded, and is **dropped** (null) when it did
     not: every comment on a pull request bumps its row, and the comment and

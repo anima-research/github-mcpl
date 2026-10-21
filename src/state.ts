@@ -14,8 +14,11 @@
  *   - `rollback(checkpointId)` computes what has to be undone (delete the
  *     created, restore the edited) and returns null for an unknown checkpoint
  *     so the caller can answer -32005 (§8.7);
- *   - the polling cursor `lastPollAt` and the dedup ring of the last
- *     {@link POLL_DEDUP_RING} poll keys (contract amendment 1), and the last
+ *   - the polling cursors, one per repository and list in `pollCursors` with
+ *     `lastPollAt` where a list with none of its own starts, the rows
+ *     announced as new while inside their list's window (`pollNew`), the
+ *     dedup ring of the last {@link POLL_DEDUP_RING} poll keys (contract
+ *     amendment 1), and the last
  *     polled head sha of each open pull request, bounded by
  *     {@link POLL_HEAD_MEMORY} (amendment 2a).
  *
@@ -42,6 +45,7 @@ import {
   type CreatedComment,
   type EditedComment,
   type Logger,
+  type PollCursor,
   type RollbackPlan,
   type StateSnapshot,
   type StateStore,
@@ -137,6 +141,8 @@ export function emptySnapshot(): GithubStateSnapshot {
     edited: {},
     deleted: {},
     lastPollAt: null,
+    pollCursors: {},
+    pollNew: {},
     pollKeys: [],
     pollHeads: {},
   };
@@ -194,6 +200,10 @@ export class GithubState implements GithubStateStore {
     if (!snap) {
       logger.warn(`state: ${file} is not a version ${STATE_VERSION} snapshot; starting empty`);
       return GithubState.empty(file, logger);
+    }
+    const kept = (parsed as { lastPollAt?: unknown }).lastPollAt;
+    if (kept !== undefined && kept !== null && snap.lastPollAt === null) {
+      logger.warn(`state: ${file} has a lastPollAt that isn't a time (${JSON.stringify(kept)}); polling starts one interval back`);
     }
     return new GithubState(file, snap, logger);
   }
@@ -313,6 +323,22 @@ export class GithubState implements GithubStateStore {
     this.snap.lastPollAt = when;
   }
 
+  pollCursors(): Readonly<Record<string, PollCursor>> {
+    return this.snap.pollCursors;
+  }
+
+  setPollCursors(cursors: Record<string, PollCursor>): void {
+    this.snap.pollCursors = cursors;
+  }
+
+  polledNew(): Readonly<Record<string, Record<string, string>>> {
+    return this.snap.pollNew;
+  }
+
+  setPolledNew(rows: Record<string, Record<string, string>>): void {
+    this.snap.pollNew = rows;
+  }
+
   seenPollKey(key: string): boolean {
     if (this.snap.pollKeys.includes(key)) return true;
     this.snap.pollKeys.push(key);
@@ -396,12 +422,40 @@ function normalize(parsed: unknown): GithubStateSnapshot | null {
   snap.created = buckets(raw.created);
   snap.edited = buckets(raw.edited);
   snap.deleted = buckets(raw.deleted);
-  snap.lastPollAt = typeof raw.lastPollAt === 'string' ? raw.lastPollAt : null;
+  // Only an instant: it is the start of every list with no cursor of its own.
+  snap.lastPollAt =
+    typeof raw.lastPollAt === 'string' && Number.isFinite(Date.parse(raw.lastPollAt)) ? raw.lastPollAt : null;
+  // Additive like `pollHeads`: a file written before them starts every list
+  // from `lastPollAt`, with no row remembered as announced new.
+  snap.pollCursors = cursors(raw.pollCursors);
+  snap.pollNew = {};
+  if (raw.pollNew && typeof raw.pollNew === 'object' && !Array.isArray(raw.pollNew)) {
+    for (const [list, rows] of Object.entries(raw.pollNew)) snap.pollNew[list] = strings(rows);
+  }
   snap.pollKeys = Array.isArray(raw.pollKeys) ? raw.pollKeys.filter((k): k is string => typeof k === 'string') : [];
   // Additive since amendment 2a, so a state file written before it is still a
   // valid version-1 snapshot: an absent map just means no head is known yet.
   snap.pollHeads = strings(raw.pollHeads);
   return snap;
+}
+
+/**
+ * Poll cursors from untrusted JSON. An entry whose `since` isn't an instant is
+ * dropped, and its list starts from `lastPollAt`, which is never later than
+ * where any list stopped; a `resumeAt` that isn't one is left out, so the
+ * list reads from its `since`.
+ */
+function cursors(raw: unknown): Record<string, PollCursor> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const instant = (value: unknown): value is string => typeof value === 'string' && Number.isFinite(Date.parse(value));
+  const out: Record<string, PollCursor> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!value || typeof value !== 'object') continue;
+    const { since, resumeAt } = value as { since?: unknown; resumeAt?: unknown };
+    if (!instant(since)) continue;
+    out[key] = instant(resumeAt) ? { since, resumeAt } : { since };
+  }
+  return out;
 }
 
 /** A `Record<string, string>` from untrusted JSON; non-string values dropped. */
