@@ -1,0 +1,8 @@
+# Scratch file for the github-mcpl merge test; never reaches main.
+name: e2e-noop
+on: workflow_dispatch
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo noop
