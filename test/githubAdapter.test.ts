@@ -1026,42 +1026,56 @@ test('a 405 from the merge endpoint is the caller’s error, with GitHub’s rea
   });
 });
 
-test('listReviews pages to the end, so the newest verdict is never cut off', async () => {
+test('listReviews asks GraphQL for the newest reviews and the total, so the newest verdict is never cut off', async () => {
   const r = await rig();
-  const review = (id: number, state: string) => ({
-    id,
-    user: { login: id % 2 ? 'github-actions[bot]' : 'maintainer', type: id % 2 ? 'Bot' : 'User' },
+  const node = (id: number, state: string, bot: boolean) => ({
+    databaseId: id,
+    author: bot ? { login: 'github-actions', __typename: 'Bot' } : { login: 'maintainer', __typename: 'User' },
     state,
     body: `review ${id}`,
-    commit_id: HEAD_SHA,
-    submitted_at: '2026-10-01T00:00:00Z',
-    html_url: `https://github.com/x#pullrequestreview-${id}`,
+    commit: { oid: HEAD_SHA },
+    submittedAt: '2026-10-01T00:00:00Z',
+    url: `https://github.com/x#pullrequestreview-${id}`,
   });
-  r.fake.on('GET /repos/anima-research/rayforce/pulls/12/reviews', (req) =>
-    req.query.page === '1'
-      ? { body: Array.from({ length: 100 }, (_, i) => review(i + 1, 'COMMENTED')) }
-      : { body: [review(101, 'DISMISSED'), review(102, 'APPROVED')] },
-  );
-  const reviews = await r.adapter.listReviews(PULL);
-  const asked = r.fake.for('GET /repos/anima-research/rayforce/pulls/12/reviews');
-  assert.deepEqual(
-    asked.map((c) => [c.query.per_page, c.query.page]),
-    [
-      ['100', '1'],
-      ['100', '2'],
-    ],
-  );
-  assert.equal(reviews.length, 102);
-  assert.deepEqual(reviews.at(-1), {
-    id: 102,
+  r.fake.on('POST /graphql', {
+    body: {
+      data: {
+        repository: {
+          pullRequest: {
+            reviews: { totalCount: 612, nodes: [node(611, 'DISMISSED', true), null, node(612, 'APPROVED', false)] },
+          },
+        },
+      },
+    },
+  });
+  const list = await r.adapter.listReviews(PULL);
+  const sent = r.fake.for('POST /graphql')[0].body;
+  assert.match(String(sent.query), /reviews\(last:\$last\)\{\s*totalCount/);
+  assert.deepEqual(sent.variables, { owner: 'anima-research', name: 'rayforce', number: 12, last: 50 });
+  assert.equal(list.total, 612);
+  assert.equal(list.reviews.length, 2, 'a null node is skipped, not mapped');
+  assert.deepEqual(list.reviews[1], {
+    id: 612,
     author: { login: 'maintainer', isBot: false },
     state: 'approved',
-    body: 'review 102',
+    body: 'review 612',
     commitId: HEAD_SHA,
     submittedAt: '2026-10-01T00:00:00Z',
-    html_url: 'https://github.com/x#pullrequestreview-102',
+    html_url: 'https://github.com/x#pullrequestreview-612',
   });
-  assert.equal(reviews.at(-2)?.state, 'dismissed');
+  assert.deepEqual(list.reviews[0].author, { login: 'github-actions', isBot: true });
+  assert.equal(list.reviews[0].state, 'dismissed');
+});
+
+test('branchFacts reads protection, the default branch and the open pull requests based on a branch', async () => {
+  const r = await rig();
+  const p = '/repos/anima-research/rayforce';
+  r.fake
+    .on(`GET ${p}/branches/release`, { body: { name: 'release', protected: true } })
+    .on(`GET ${p}`, { body: { default_branch: 'dev' } })
+    .on(`GET ${p}/pulls`, { body: [{ number: 3 }] });
+  assert.deepEqual(await r.adapter.branchFacts(REPO, 'release'), { protected: true, isDefault: false, openPullsBasedOn: 1 });
+  assert.deepEqual(r.fake.for(`GET ${p}/pulls`)[0].query, { state: 'open', base: 'release', per_page: '1' });
 });
 
 test('workflow runs: list by repo or by workflow file, read one, dispatch, re-run', async () => {

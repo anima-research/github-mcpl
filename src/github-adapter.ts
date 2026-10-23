@@ -63,7 +63,9 @@ import {
   type PullRequest,
   type PullRequestFile,
   type PullRequestReview,
+  type BranchFacts,
   type RepoRef,
+  type ReviewList,
   type ReviewState,
   type ReviewThread,
   type ReviewThreadComment,
@@ -119,14 +121,6 @@ const CHECK_RUN_PAGE = 100;
  */
 const CHECK_RUN_MAX_PAGES = 5;
 
-/**
- * `list_reviews` pages: 100 reviews a page, at most this many pages. A pull
- * request that has been through many bot review rounds passes GitHub's default
- * page of 30 quickly, and the *latest* verdict is what a caller wants, so the
- * read goes to the end rather than stopping at the first page.
- */
-const REVIEW_PAGE = 100;
-const REVIEW_MAX_PAGES = 5;
 /**
  * Requests one `…Since` poll makes before it stops, past which it goes on
  * only to finish a second it is part way through, and leaves the rest for a
@@ -324,15 +318,24 @@ export interface CheckRunRow {
   html_url?: string | null;
 }
 
-/** One row of `GET /repos/{o}/{r}/pulls/{n}/reviews`. */
-interface ApiReview {
-  id?: number;
-  user?: ApiActor | null;
-  state?: string | null;
-  body?: string | null;
-  commit_id?: string | null;
-  submitted_at?: string | null;
-  html_url?: string | null;
+/** `pullRequest.reviews(last: n)`: the newest reviews and the count of all of them. */
+interface GqlReviewsResponse {
+  repository?: {
+    pullRequest?: {
+      reviews?: {
+        totalCount?: number | null;
+        nodes?: Array<{
+          databaseId?: number | null;
+          author?: GqlActor | null;
+          state?: string | null;
+          body?: string | null;
+          commit?: { oid?: string | null } | null;
+          submittedAt?: string | null;
+          url?: string | null;
+        } | null> | null;
+      } | null;
+    } | null;
+  } | null;
 }
 
 /** One row of `GET /repos/{o}/{r}/actions/runs`. */
@@ -426,15 +429,19 @@ function submittedReviewStateOf(state: string | null | undefined): SubmittedRevi
   return 'commented';
 }
 
-function mapReview(data: ApiReview): PullRequestReview {
+type GqlReview = NonNullable<
+  NonNullable<NonNullable<NonNullable<GqlReviewsResponse['repository']>['pullRequest']>['reviews']>['nodes']
+>[number];
+
+function mapReview(node: NonNullable<GqlReview>): PullRequestReview {
   return {
-    id: data.id ?? 0,
-    author: actorOf(data.user),
-    state: submittedReviewStateOf(data.state),
-    body: data.body ?? '',
-    commitId: data.commit_id ?? '',
-    submittedAt: data.submitted_at ?? '',
-    html_url: data.html_url ?? '',
+    id: node.databaseId ?? 0,
+    author: gqlActorOf(node.author),
+    state: submittedReviewStateOf(node.state),
+    body: node.body ?? '',
+    commitId: node.commit?.oid ?? '',
+    submittedAt: node.submittedAt ?? '',
+    html_url: node.url ?? '',
   };
 }
 
@@ -1468,35 +1475,32 @@ export class GitHubAdapter implements GitHubApi {
   // ───────────────────────────────────────────────────────────────────────────
 
   /**
-   * Every review on a pull request, oldest first (GitHub's order). Paged to
-   * the end up to {@link REVIEW_MAX_PAGES} pages: the newest verdict is the one
-   * that matters and it is on the *last* page, so stopping at the first would
-   * answer with a stale one.
+   * The newest {@link LIMITS.listEntries} reviews, through GraphQL's
+   * `reviews(last:)`: REST pages oldest first and has no way to ask for the
+   * end, so a bounded REST read of a long history would drop exactly the
+   * newest verdict. `totalCount` says how many older ones were left out.
    */
-  async listReviews(pull: ThreadRef): Promise<PullRequestReview[]> {
-    const rows: ApiReview[] = [];
-    for (let page = 1; page <= REVIEW_MAX_PAGES; page++) {
-      const batch = await this.call('listReviews', async () => {
-        const res = await this.octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews', {
-          owner: pull.repo.owner,
-          repo: pull.repo.name,
-          pull_number: pull.number,
-          per_page: REVIEW_PAGE,
-          page,
-        });
-        return (Array.isArray(res.data) ? res.data : []) as ApiReview[];
-      });
-      rows.push(...batch);
-      if (batch.length < REVIEW_PAGE) break;
-      if (page === REVIEW_MAX_PAGES) {
-        this.log('warn', 'listReviews: page bound reached; later reviews not read', {
-          repo: repoSlug(pull.repo),
-          number: pull.number,
-          read: rows.length,
-        });
+  async listReviews(pull: ThreadRef): Promise<ReviewList> {
+    const query = `query($owner:String!,$name:String!,$number:Int!,$last:Int!){
+  repository(owner:$owner,name:$name){
+    pullRequest(number:$number){
+      reviews(last:$last){
+        totalCount
+        nodes{ databaseId author{ login __typename } state body commit{ oid } submittedAt url }
       }
     }
-    return rows.map(mapReview);
+  }
+}`;
+    const data = await this.graphql<GqlReviewsResponse>('listReviews', query, {
+      owner: pull.repo.owner,
+      name: pull.repo.name,
+      number: pull.number,
+      last: LIMITS.listEntries,
+    });
+    const reviews = (data.repository?.pullRequest?.reviews?.nodes ?? [])
+      .filter((n): n is NonNullable<GqlReview> => n != null)
+      .map(mapReview);
+    return { total: Math.max(data.repository?.pullRequest?.reviews?.totalCount ?? 0, reviews.length), reviews };
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -1543,6 +1547,31 @@ export class GitHubAdapter implements GitHubApi {
         repo: repo.name,
         ref: `heads/${branch}`,
       });
+    });
+  }
+
+  async branchFacts(repo: RepoRef, branch: string): Promise<BranchFacts> {
+    return this.call('branchFacts', async () => {
+      const [branchRes, repoRes, pullsRes] = await Promise.all([
+        this.octokit.request('GET /repos/{owner}/{repo}/branches/{branch}', {
+          owner: repo.owner,
+          repo: repo.name,
+          branch,
+        }),
+        this.octokit.request('GET /repos/{owner}/{repo}', { owner: repo.owner, repo: repo.name }),
+        this.octokit.request('GET /repos/{owner}/{repo}/pulls', {
+          owner: repo.owner,
+          repo: repo.name,
+          state: 'open',
+          base: branch,
+          per_page: 1,
+        }),
+      ]);
+      return {
+        protected: (branchRes.data as { protected?: boolean }).protected === true,
+        isDefault: (repoRes.data as { default_branch?: string }).default_branch === branch,
+        openPullsBasedOn: Array.isArray(pullsRes.data) ? pullsRes.data.length : 0,
+      };
     });
   }
 

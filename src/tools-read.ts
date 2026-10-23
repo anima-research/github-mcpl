@@ -39,8 +39,8 @@ import {
   type IssueSearchHit,
   type PullRequest,
   type PullRequestFile,
-  type PullRequestReview,
   type RepoRef,
+  type ReviewList,
   type ReviewThread,
   type ThreadKind,
   type ThreadRef,
@@ -176,18 +176,19 @@ export function renderReviewThreads(pull: ThreadRef, threads: readonly ReviewThr
 }
 
 /**
- * Reviews, oldest first, ending on the newest — which is the one a caller
- * deciding whether to merge needs, so when the list is longer than the bound
- * it is the *oldest* that are dropped, and the line saying so comes first.
+ * The newest reviews, oldest of them first, ending on the newest — which is
+ * the one a caller deciding whether to merge needs. When the history is longer
+ * than the bound, the adapter has already dropped the *oldest*; the line
+ * saying how many comes first.
  */
-export function renderReviews(pull: ThreadRef, reviews: readonly PullRequestReview[]): string {
-  if (reviews.length === 0) return `no reviews on ${ref(pull.repo, pull.number)}`;
-  const shown = reviews.slice(-LIMITS.listEntries);
-  const dropped = reviews.length - shown.length;
+export function renderReviews(pull: ThreadRef, list: ReviewList): string {
+  const { total, reviews } = list;
+  if (total === 0 || reviews.length === 0) return `no reviews on ${ref(pull.repo, pull.number)}`;
+  const dropped = total - reviews.length;
   return lines(
-    `${reviews.length} review${reviews.length === 1 ? '' : 's'} on ${ref(pull.repo, pull.number)}, oldest first`,
+    `${total} review${total === 1 ? '' : 's'} on ${ref(pull.repo, pull.number)}, oldest first`,
     dropped > 0 && `… ${dropped} older not shown (list bound ${LIMITS.listEntries})`,
-    ...shown.map((r) =>
+    ...reviews.map((r) =>
       lines(
         `— id ${r.id} ${field(r.state)} by ${field(r.author.login)} at ${field(r.submittedAt || 'not submitted')} ` +
           `on ${field(r.commitId.slice(0, 12), FIELD.sha)}  ${field(r.html_url, FIELD.url)}`,

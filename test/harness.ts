@@ -51,7 +51,9 @@ import {
   type PullRequest,
   type PullRequestFile,
   type PullRequestReview,
+  type BranchFacts,
   type RepoRef,
+  type ReviewList,
   type ReviewThread,
   type SubmittedReview,
   type WorkflowRun,
@@ -118,6 +120,10 @@ export class FakeGitHubApi implements GitHubApi {
   mergeRefusal: string | null = null;
   /** What the next `deleteBranch` throws instead, when set (a 422 from a repo that already deleted it). */
   deleteBranchError: Error | null = null;
+  /** What `branchFacts` answers, by branch name; absent = an ordinary unprotected branch. */
+  readonly branchFactsByName = new Map<string, BranchFacts>();
+  /** A head that moves after the tool read it and before GitHub merges (the 409 race). */
+  moveHeadBeforeMerge: string | null = null;
   private nextNumber = 1;
   private nextId = 1000;
   private lastStamp = 0;
@@ -608,12 +614,19 @@ export class FakeGitHubApi implements GitHubApi {
 
   // ── Reviews, merge, actions ──
 
-  async listReviews(pull: ThreadRef): Promise<PullRequestReview[]> {
+  async listReviews(pull: ThreadRef): Promise<ReviewList> {
     this.record('listReviews', pull);
     if (!this.pulls.has(key(pull.repo, pull.number))) {
       throw new Error(`no such pull request: ${key(pull.repo, pull.number)}`);
     }
-    return [...(this.reviewLists.get(key(pull.repo, pull.number)) ?? [])];
+    // GraphQL's `reviews(last: 50)`: the newest, and the count of all.
+    const all = this.reviewLists.get(key(pull.repo, pull.number)) ?? [];
+    return { total: all.length, reviews: all.slice(-LIMITS.listEntries) };
+  }
+
+  async branchFacts(repo: RepoRef, branch: string): Promise<BranchFacts> {
+    this.record('branchFacts', repo, branch);
+    return this.branchFactsByName.get(branch) ?? { protected: false, isDefault: false, openPullsBasedOn: 0 };
   }
 
   async mergePullRequest(pull: ThreadRef, input: MergePullRequestInput): Promise<MergeResult> {
@@ -624,6 +637,10 @@ export class FakeGitHubApi implements GitHubApi {
       const message = this.mergeRefusal;
       this.mergeRefusal = null;
       return { merged: false, sha: '', message };
+    }
+    if (this.moveHeadBeforeMerge !== null) {
+      pr.head = { ...pr.head, sha: this.moveHeadBeforeMerge };
+      this.moveHeadBeforeMerge = null;
     }
     if (input.sha !== pr.head.sha) {
       throw Object.assign(new Error('Head branch was modified. Review and try the merge again.'), { status: 409 });

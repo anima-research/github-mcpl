@@ -358,6 +358,24 @@ export interface PullRequestReview {
   html_url: string;
 }
 
+/** The newest reviews (oldest of them first) and the count of all of them. */
+export interface ReviewList {
+  total: number;
+  reviews: PullRequestReview[];
+}
+
+/**
+ * What GitHub knows about a branch that bears on deleting it: a protected
+ * branch, the default branch, or a branch other open pull requests target is
+ * somebody's base, whatever the allow-lists say.
+ */
+export interface BranchFacts {
+  protected: boolean;
+  isDefault: boolean;
+  /** Open pull requests whose base is this branch (counted to 1 or more, not exactly). */
+  openPullsBasedOn: number;
+}
+
 export type MergeMethod = 'merge' | 'squash' | 'rebase';
 
 export interface MergePullRequestInput {
@@ -532,8 +550,12 @@ export interface GitHubApi {
   createPullRequest(repo: RepoRef, input: CreatePullRequestInput): Promise<PullRequest>;
 
   // ── Reviews (read) ──
-  /** Every submitted review on a pull request, oldest first, paged to the end (bounded). */
-  listReviews(pull: ThreadRef): Promise<PullRequestReview[]>;
+  /**
+   * The newest {@link LIMITS.listEntries} reviews on a pull request, oldest
+   * of them first, and how many there are in all — so a long history drops
+   * its *oldest* reviews, never the newest verdict.
+   */
+  listReviews(pull: ThreadRef): Promise<ReviewList>;
 
   // ── Merge ──
   mergePullRequest(pull: ThreadRef, input: MergePullRequestInput): Promise<MergeResult>;
@@ -541,6 +563,8 @@ export interface GitHubApi {
   updatePullRequestBranch(pull: ThreadRef, expectedHeadSha?: string): Promise<void>;
   /** Delete `refs/heads/<branch>` in `repo`. */
   deleteBranch(repo: RepoRef, branch: string): Promise<void>;
+  /** What decides whether a merged head branch may be deleted. */
+  branchFacts(repo: RepoRef, branch: string): Promise<BranchFacts>;
 
   // ── Actions ──
   listWorkflowRuns(repo: RepoRef, input: ListWorkflowRunsInput): Promise<WorkflowRun[]>;
@@ -583,6 +607,7 @@ export const GITHUB_API_METHODS = [
   'mergePullRequest',
   'updatePullRequestBranch',
   'deleteBranch',
+  'branchFacts',
   'listWorkflowRuns',
   'getWorkflowRun',
   'dispatchWorkflow',
@@ -1178,9 +1203,11 @@ export class ConfigError extends Error {
 export type Env = Record<string, string | undefined>;
 
 /**
- * The branches a pull request on `repo` may target: every plain entry of
- * GITHUB_PR_BASE_ALLOW plus the `owner/name:branch` entries scoped to this
- * repository. Order and duplicates as written; the caller only asks `includes`.
+ * The entries of a scoped allow-list that apply to `repo`: every plain entry
+ * plus the `owner/name:<value>` entries scoped to this repository. Used for
+ * branches (GITHUB_PR_BASE_ALLOW, GITHUB_MERGE_BASE_ALLOW) and for workflow
+ * files (GITHUB_WORKFLOW_ALLOW). Order and duplicates as written; the caller
+ * only asks `includes`.
  */
 export function allowedBases(repo: RepoRef, entries: readonly string[]): string[] {
   const out: string[] = [];
@@ -1256,11 +1283,19 @@ function readPort(name: EnvVar, raw: string | undefined, problems: string[]): nu
 }
 
 /**
- * A base-branch allow-list (GITHUB_PR_BASE_ALLOW, GITHUB_MERGE_BASE_ALLOW):
- * `branch` for every repository, `owner/name:branch` for one. A scoped entry
- * must parse and must name a repository in GITHUB_REPOS.
+ * A scoped allow-list — of base branches (GITHUB_PR_BASE_ALLOW,
+ * GITHUB_MERGE_BASE_ALLOW) or of workflow files (GITHUB_WORKFLOW_ALLOW):
+ * `<value>` for every repository, `owner/name:<value>` for one. A scoped entry
+ * must parse and must name a repository in GITHUB_REPOS. `noun` names what
+ * the values are, so an error about workflow files does not talk of branches.
  */
-function readBaseAllow(name: EnvVar, raw: string | undefined, repos: readonly RepoRef[], problems: string[]): string[] {
+function readBaseAllow(
+  name: EnvVar,
+  raw: string | undefined,
+  repos: readonly RepoRef[],
+  problems: string[],
+  noun = 'branch',
+): string[] {
   const entries = csv(raw);
   for (const entry of entries) {
     const at = entry.indexOf(':');
@@ -1268,7 +1303,7 @@ function readBaseAllow(name: EnvVar, raw: string | undefined, repos: readonly Re
     const scope = parseRepoSlug(entry.slice(0, at));
     const branch = entry.slice(at + 1);
     if (!scope || !branch) {
-      problems.push(`${name}: "${entry}" is neither a branch nor owner/name:branch`);
+      problems.push(`${name}: "${entry}" is neither a ${noun} nor owner/name:${noun}`);
     } else if (repos.length > 0 && !repoAllowed(scope, repos)) {
       problems.push(`${name}: "${entry}" names a repository outside GITHUB_REPOS`);
     }
@@ -1365,7 +1400,7 @@ export function readConfig(env: Env = process.env): Config {
 
   const prBaseAllow = readBaseAllow('GITHUB_PR_BASE_ALLOW', env.GITHUB_PR_BASE_ALLOW, repos, problems);
   const mergeBaseAllow = readBaseAllow('GITHUB_MERGE_BASE_ALLOW', env.GITHUB_MERGE_BASE_ALLOW, repos, problems);
-  const workflowAllow = readBaseAllow('GITHUB_WORKFLOW_ALLOW', env.GITHUB_WORKFLOW_ALLOW, repos, problems);
+  const workflowAllow = readBaseAllow('GITHUB_WORKFLOW_ALLOW', env.GITHUB_WORKFLOW_ALLOW, repos, problems, 'workflow file');
   for (const entry of workflowAllow) {
     const file = entry.slice(entry.indexOf(':') + 1);
     if (file && !isWorkflowFileName(file)) {

@@ -305,6 +305,11 @@ test('GITHUB_MERGE_BASE_ALLOW and GITHUB_WORKFLOW_ALLOW parse like the base allo
   for (const bad of ['.github/workflows/ci.yml', '12345', 'Review', 'ci.yml.bak']) {
     assert.match(problems({ GITHUB_WORKFLOW_ALLOW: bad })[0], /not a workflow file name/, bad);
   }
+  // A malformed scoped entry is described as what the list holds: files, not branches.
+  assert.match(
+    problems({ GITHUB_WORKFLOW_ALLOW: 'anima-research/rayforce:' })[0],
+    /^GITHUB_WORKFLOW_ALLOW: "anima-research\/rayforce:" is neither a workflow file nor owner\/name:workflow file$/,
+  );
 });
 
 test('readConfig names every problem at once', () => {

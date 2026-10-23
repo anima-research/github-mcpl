@@ -50,11 +50,11 @@ function failure(result: ToolResult): string {
 }
 
 const PULL: ThreadRef = { repo: TEST_REPO, number: 8, kind: 'pull' };
-const HEAD = 'head8'.padEnd(40, '0');
+const HEAD = 'abc8'.padEnd(40, '0');
 
 function seeded(): FakeGitHubApi {
   const api = new FakeGitHubApi();
-  api.seedPullRequest({ number: 8, headRepo: TEST_REPO });
+  api.seedPullRequest({ number: 8, headRepo: TEST_REPO, head: { ref: 'feature-8', sha: HEAD } });
   return api;
 }
 
@@ -69,7 +69,7 @@ test('the module declares github.merge and its two tools', () => {
 test('merge_pull_request merges at the head sha it read, by merge commit by default', async () => {
   const api = seeded();
   const out = ok(await mergeToolModule.call('merge_pull_request', { number: 8, sha: HEAD }, ctx(api)));
-  assert.match(out, /^merged anima-research\/rayforce#8 \(feature-8 at head80+\) into dev by merge: merge0+$/);
+  assert.match(out, /^merged anima-research\/rayforce#8 \(feature-8 at abc80+\) into dev by merge: merge0+$/);
   assert.deepEqual(api.callsTo('mergePullRequest')[0].args, [
     PULL,
     { method: 'merge', sha: HEAD, title: undefined, message: undefined },
@@ -123,9 +123,35 @@ test('a base GITHUB_PR_BASE_ALLOW names is not thereby mergeable', async () => {
 
 test('a head that moved since it was read is refused before GitHub is asked', async () => {
   const api = seeded();
-  const out = failure(await mergeToolModule.call('merge_pull_request', { number: 8, sha: 'abc123' }, ctx(api)));
-  assert.match(out, /the head of anima-research\/rayforce#8 is head80+, not "abc123": it moved since it was read/);
+  const out = failure(await mergeToolModule.call('merge_pull_request', { number: 8, sha: 'def4567' }, ctx(api)));
+  assert.match(out, /the head of anima-research\/rayforce#8 is abc80+, not "def4567": it moved since it was read/);
   assert.equal(api.callsTo('mergePullRequest').length, 0);
+});
+
+test('a short or upper-case sha of the head is the head, and the full sha goes to GitHub', async () => {
+  for (const sha of [HEAD.slice(0, 7), HEAD.slice(0, 12), HEAD.toUpperCase(), ` ${HEAD} `]) {
+    const api = seeded();
+    ok(await mergeToolModule.call('merge_pull_request', { number: 8, sha }, ctx(api)));
+    assert.equal((api.callsTo('mergePullRequest')[0].args[1] as { sha: string }).sha, HEAD, sha);
+  }
+});
+
+test('a sha that is not 7 to 40 hex digits is a malformed call, not a moved head', async () => {
+  for (const sha of ['abc12', 'not-a-sha', 'g'.repeat(40), 'a'.repeat(41)]) {
+    const api = seeded();
+    const out = failure(await mergeToolModule.call('merge_pull_request', { number: 8, sha }, ctx(api)));
+    assert.match(out, /"sha" must be a commit sha \(7 to 40 hex digits\)/, sha);
+    assert.doesNotMatch(out, /moved/);
+  }
+});
+
+test('a head that moves between the read and the merge is GitHub’s 409, and no branch is deleted', async () => {
+  const api = seeded();
+  api.moveHeadBeforeMerge = 'f'.repeat(40);
+  const out = failure(await mergeToolModule.call('merge_pull_request', { number: 8, sha: HEAD, delete_branch: true }, ctx(api)));
+  assert.match(out, /merge_pull_request failed: GitHub error 409: Head branch was modified/);
+  assert.equal(api.callsTo('deleteBranch').length, 0);
+  assert.equal(api.callsTo('branchFacts').length, 0);
 });
 
 test('draft, closed and merged pull requests are refused by name', async () => {
@@ -162,8 +188,25 @@ test('delete_branch deletes the merged head branch of this repository', async ()
   const out = ok(await mergeToolModule.call('merge_pull_request', { number: 8, delete_branch: true }, ctx(api)));
   assert.match(out, /\ndeleted branch feature-8$/);
   assert.deepEqual(api.deletedBranches, ['anima-research/rayforce:feature-8']);
-  // Deleted only after the merge answered.
-  assert.deepEqual(api.callLog().slice(-2), ['mergePullRequest', 'deleteBranch']);
+  // Deleted only after the merge answered, and after GitHub said it is nobody's base.
+  assert.deepEqual(api.callLog().slice(-3), ['mergePullRequest', 'branchFacts', 'deleteBranch']);
+});
+
+test('delete_branch keeps a branch GitHub says is a base: protected, default, or targeted by an open PR', async () => {
+  const cases: Array<[{ protected: boolean; isDefault: boolean; openPullsBasedOn: number }, RegExp]> = [
+    // The back-merge case: `release` kept out of every allow-list, protected on GitHub.
+    [{ protected: true, isDefault: false, openPullsBasedOn: 0 }, /head branch kept: "feature-8" is protected on GitHub/],
+    [{ protected: false, isDefault: true, openPullsBasedOn: 0 }, /head branch kept: "feature-8" is the repository's default branch/],
+    [{ protected: false, isDefault: false, openPullsBasedOn: 1 }, /head branch kept: "feature-8" is the base of another open pull request/],
+  ];
+  for (const [facts, expected] of cases) {
+    const api = seeded();
+    api.branchFactsByName.set('feature-8', facts);
+    const out = ok(await mergeToolModule.call('merge_pull_request', { number: 8, delete_branch: true }, ctx(api)));
+    assert.match(out, /^merged /);
+    assert.match(out, expected);
+    assert.equal(api.callsTo('deleteBranch').length, 0);
+  }
 });
 
 test('delete_branch keeps a fork’s branch, an unknown head repository, and any base branch', async () => {
@@ -202,14 +245,39 @@ test('a failed branch deletion is reported beside a merge that happened, not as 
   assert.match(out, /head branch not deleted: deleteBranch failed: GitHub error 422: Reference does not exist/);
 });
 
-test('update_branch asks GitHub to merge the base in, with the expected head when given', async () => {
+test('update_branch merges the base in, guarded by the head it read', async () => {
   const api = seeded();
-  const out = ok(await mergeToolModule.call('update_branch', { number: 8, sha: HEAD }, ctx(api)));
-  assert.match(out, /asked GitHub to merge the base of anima-research\/rayforce#8 into its head branch/);
+  const out = ok(await mergeToolModule.call('update_branch', { number: 8, sha: HEAD.slice(0, 12) }, ctx(api)));
+  assert.match(out, /asked GitHub to merge dev into feature-8 \(anima-research\/rayforce#8, head abc80+\)/);
+  // The full head sha, whatever form the caller gave, and also when it gave none.
   assert.deepEqual(api.callsTo('updatePullRequestBranch')[0].args, [PULL, HEAD]);
+  ok(await mergeToolModule.call('update_branch', { number: 8 }, ctx(api)));
+  assert.deepEqual(api.callsTo('updatePullRequestBranch')[1].args, [PULL, HEAD]);
 
-  const moved = failure(await mergeToolModule.call('update_branch', { number: 8, sha: 'abc' }, ctx(api)));
-  assert.match(moved, /update_branch failed: GitHub error 422: expected head sha didn’t match/);
+  const moved = failure(await mergeToolModule.call('update_branch', { number: 8, sha: 'def4567' }, ctx(api)));
+  assert.match(moved, /update_branch refused: the head of anima-research\/rayforce#8 is abc80+, not "def4567"/);
+});
+
+test('update_branch takes a merge’s fences: allowed base, open pull request, head not a base', async () => {
+  const cases: Array<[Record<string, unknown>, Partial<ToolContext>, RegExp]> = [
+    // GITHUB_MERGE_BASE_ALLOW unset: granting github.merge alone writes nothing.
+    [{}, { mergeBaseAllow: [] }, /base branch "dev" is not in GITHUB_MERGE_BASE_ALLOW/],
+    [{ state: 'closed' }, {}, /#8 is closed; reopen it before updating/],
+    [{ state: 'closed', merged: true }, {}, /#8 is already merged/],
+    // `main → dev` would merge dev into main.
+    [{ head: { ref: 'main', sha: HEAD } }, { prBaseAllow: ['dev', 'main'] }, /the head of anima-research\/rayforce#8, "main", is a base branch here/],
+  ];
+  for (const [partial, over, expected] of cases) {
+    const api = new FakeGitHubApi();
+    api.seedPullRequest({ number: 8, headRepo: TEST_REPO, head: { ref: 'feature-8', sha: HEAD }, ...partial });
+    const out = failure(await mergeToolModule.call('update_branch', { number: 8 }, ctx(api, over)));
+    assert.match(out, expected);
+    assert.equal(api.callsTo('updatePullRequestBranch').length, 0);
+  }
+  // A draft may be brought up to date; it just may not be merged.
+  const api = new FakeGitHubApi();
+  api.seedPullRequest({ number: 8, draft: true, head: { ref: 'feature-8', sha: HEAD } });
+  ok(await mergeToolModule.call('update_branch', { number: 8 }, ctx(api)));
 });
 
 test('an unknown tool name is refused by the module', async () => {

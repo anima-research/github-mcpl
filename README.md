@@ -355,21 +355,26 @@ Notes worth knowing before you grant them:
   and landing one are separate grants. `merge_pull_request` is
   `github.merge`'s, and it refuses a base outside `GITHUB_MERGE_BASE_ALLOW`
   (empty = no merge), a draft, a closed or merged pull request, and — given
-  `sha`, the head you reviewed — a head that has moved since. Branch
-  protection (required checks, approvals) stays GitHub's to enforce.
-  `delete_branch: true` deletes the merged head branch only when it lives in
-  the base repository and is not a base branch any allow-list names.
+  `sha`, the head you reviewed, full or 7+ hex digits — a head that has moved
+  since. Branch protection (required checks, approvals) stays GitHub's to
+  enforce. `delete_branch: true` deletes the merged head branch only when it
+  lives in the base repository and is nobody's base: not named by an
+  allow-list, not protected on GitHub, not the default branch, and not the
+  base of another open pull request — so a back-merge `release → dev` keeps
+  `release` even though `release` is in no allow-list.
 - `update_branch` merges the base into a pull request's head branch, as
-  GitHub's "Update branch" button does.
+  GitHub's "Update branch" button does. That writes a commit, so it takes a
+  merge's fences: an open pull request into a base `GITHUB_MERGE_BASE_ALLOW`
+  names, and a head that is not itself a base branch.
 - `dispatch_workflow` and `rerun_workflow_run` act only on workflow files
   `GITHUB_WORKFLOW_ALLOW` names (empty = none), and a dispatch runs only on a
   base branch, so the workflow that runs is one that was reviewed and merged.
   The use it was built for: a review workflow that ignores comments from bots
   still takes a `workflow_dispatch` (`review.yml` with `{"pr-number": "12"}`).
   `list_workflow_runs` is a read and is not fenced.
-- `list_reviews` reads every submitted review to the end — a pull request
-  that has been through many bot review rounds passes GitHub's first page
-  quickly, and the newest verdict is on the last one.
+- `list_reviews` answers the newest 50 reviews and the total — a pull request
+  that has been through many bot review rounds passes GitHub's first REST page
+  quickly, and REST pages oldest first, so it asks GraphQL for the last ones.
 - Every write tool refuses a repository outside `GITHUB_REPOS`, by name,
   before the call reaches GitHub.
 
@@ -491,9 +496,10 @@ reach metadata and never reach the model.
   the agent reads the log by following the URL as a human would, or does
   without. (RFC-005 references for logs and diffs are on the roadmap, not
   here.)
-- **No push.** The App can merge a pull request and delete its merged head
-  branch, but no tool writes a commit, creates a branch or touches a branch
-  outside a pull request.
+- **No push.** Commits are written only by GitHub's own pull-request merge
+  (onto an allowed base) and "Update branch" (onto the head of a pull request
+  into an allowed base). No tool pushes a commit, creates a branch or touches
+  a branch outside a pull request.
 - **Polling is no faster than 60 s** and cannot see pushes that touch no
   thread.
 - **No reactions, no labels, no assignees, no projects, no releases.**

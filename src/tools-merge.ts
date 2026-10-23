@@ -18,11 +18,17 @@
  *     a deployment that never set it cannot merge anything, whatever the host
  *     grants;
  *   - a draft, a closed or an already-merged pull request is refused by name;
- *   - with `sha`, a head that has moved since the caller read it is refused —
- *     a merge only ever lands the commit somebody looked at (GitHub enforces
- *     the same sha again, with a 409, in case it moves in between);
+ *   - with `sha` (full, or a prefix of 7 or more hex digits), a head that has
+ *     moved since the caller read it is refused — a merge only ever lands the
+ *     commit somebody looked at (GitHub enforces the full sha again, with a
+ *     409, in case it moves in between);
  *   - `delete_branch` deletes only a head branch in the base repository
- *     itself, never one a base allow-list names.
+ *     itself, and never one that is a base anywhere: named by an allow-list,
+ *     protected on GitHub, the default branch, or the base of another open
+ *     pull request;
+ *   - `update_branch` writes a merge commit onto the head branch, so it takes
+ *     the same fences as a merge — an open pull request into an allowed base —
+ *     and refuses a head that is itself a base branch.
  *
  * Branch protection — required checks, required approvals, linear history —
  * is GitHub's to enforce, and its refusal (405) comes back as it is.
@@ -30,6 +36,7 @@
 
 import {
   MERGE_FEATURE_SET,
+  type BranchFacts,
   TOOL_MERGE_PULL_REQUEST,
   TOOL_UPDATE_BRANCH,
   allowedBases,
@@ -77,20 +84,57 @@ export function requireMergeBase(base: string, repo: RepoRef, ctx: ToolContext):
   refuse(`base branch ${echo(base)} is not in GITHUB_MERGE_BASE_ALLOW (${allowed})`);
 }
 
-/** Why a pull request cannot be merged as it stands, or null when it can be tried. */
-function notMergeable(pr: PullRequest): string | null {
+/** Why a pull request cannot be merged (or updated) as it stands, or null when it can be tried. */
+function notMergeable(pr: PullRequest, action: 'merging' | 'updating'): string | null {
   const at = `${repoSlug(pr.repo)}#${pr.number}`;
   if (pr.merged) return `${at} is already merged`;
-  if (pr.state === 'closed') return `${at} is closed; reopen it before merging`;
-  if (pr.draft) return `${at} is a draft; mark it ready for review (edit_pull_request draft: false) before merging`;
+  if (pr.state === 'closed') return `${at} is closed; reopen it before ${action}`;
+  if (action === 'merging' && pr.draft) {
+    return `${at} is a draft; mark it ready for review (edit_pull_request draft: false) before merging`;
+  }
   return null;
 }
 
+/** A sha as a caller may pass one: 7 to 40 hex digits, any case. */
+const SHA_PREFIX = /^[0-9a-f]{7,40}$/;
+
 /**
- * Whether the merged head branch may be deleted, and if not, why not. Only a
- * branch of the base repository itself — a fork's branch is its owner's — and
- * never a branch that any allow-list names as a base: deleting `main` because
- * someone opened `main → release` would be the worst outcome this tool has.
+ * The caller's `sha` against the head GitHub reports. A prefix of seven or
+ * more hex digits is accepted, in either case — the tools print 12-character
+ * shas — and the full head sha is what goes to GitHub. Anything else that does
+ * not match is a head that moved, and the refusal says which head it is now.
+ */
+function requireHeadSha(expected: string, pr: PullRequest): void {
+  const asked = expected.trim().toLowerCase();
+  if (!SHA_PREFIX.test(asked)) {
+    throw new ToolArgumentError(`"sha" must be a commit sha (7 to 40 hex digits), got ${echo(expected, FIELD.sha)}`);
+  }
+  if (!pr.head.sha.toLowerCase().startsWith(asked)) {
+    refuse(
+      `the head of ${repoSlug(pr.repo)}#${pr.number} is ${field(pr.head.sha, FIELD.sha)}, not ` +
+        `${echo(expected, FIELD.sha)}: it moved since it was read. Read it again (and its reviews and ` +
+        `checks) before acting on it.`,
+    );
+  }
+}
+
+/**
+ * The branches no tool here writes to or deletes: the pull request's own base
+ * and every branch an allow-list names as a base.
+ */
+function baseBranches(pr: PullRequest, ctx: ToolContext): Set<string> {
+  return new Set([
+    pr.base.ref,
+    ...allowedBases(pr.repo, ctx.prBaseAllow),
+    ...allowedBases(pr.repo, ctx.mergeBaseAllow ?? []),
+  ]);
+}
+
+/**
+ * Whether the merged head branch may be deleted, as far as the pull request
+ * itself can tell, and if not, why not. Only a branch of the base repository
+ * itself — a fork's branch is its owner's — and never a branch an allow-list
+ * names as a base. {@link deletionBlockedOnGitHub} asks GitHub the rest.
  */
 function branchDeletionBlocked(pr: PullRequest, ctx: ToolContext): string | null {
   const branch = pr.head.ref;
@@ -99,14 +143,23 @@ function branchDeletionBlocked(pr: PullRequest, ctx: ToolContext): string | null
   if (!sameRepo(pr.headRepo, pr.repo)) {
     return `the head branch lives in ${field(repoSlug(pr.headRepo), FIELD.slug)}, not in ${repoSlug(pr.repo)}`;
   }
-  const protectedBranches = new Set([
-    pr.base.ref,
-    ...allowedBases(pr.repo, ctx.prBaseAllow),
-    ...allowedBases(pr.repo, ctx.mergeBaseAllow ?? []),
-  ]);
-  if (protectedBranches.has(branch)) {
+  if (baseBranches(pr, ctx).has(branch)) {
     return `${echo(branch)} is a base branch here (GITHUB_PR_BASE_ALLOW / GITHUB_MERGE_BASE_ALLOW) and is never deleted`;
   }
+  return null;
+}
+
+/**
+ * The part of "is this somebody's base?" only GitHub knows. A release branch
+ * kept *out* of the allow-lists — so that nothing here can target it — is
+ * still a base: a back-merge `release → dev` must not delete `release`. So a
+ * protected branch, the default branch, and a branch other open pull requests
+ * target are all kept.
+ */
+function deletionBlockedOnGitHub(branch: string, facts: BranchFacts): string | null {
+  if (facts.isDefault) return `${echo(branch)} is the repository's default branch`;
+  if (facts.protected) return `${echo(branch)} is protected on GitHub`;
+  if (facts.openPullsBasedOn > 0) return `${echo(branch)} is the base of another open pull request`;
   return null;
 }
 
@@ -125,7 +178,8 @@ export const mergeTools: ToolDefinition[] = [
         number: { type: 'integer', minimum: 1, description: 'Pull-request number' },
         sha: {
           type: 'string',
-          description: 'The head sha this merge is for; refused if the head has moved (recommended)',
+          description:
+            'The head sha this merge is for (full, or 7+ hex digits); refused if the head has moved (recommended)',
         },
         method: {
           type: 'string',
@@ -137,7 +191,8 @@ export const mergeTools: ToolDefinition[] = [
         delete_branch: {
           type: 'boolean',
           description:
-            'Delete the head branch once merged (default false). Only a branch of this repository, never a base branch.',
+            'Delete the head branch once merged (default false). Only a branch of this repository that is nobody’s ' +
+            'base: not allow-listed, not protected, not the default branch, not the base of another open pull request.',
         },
       },
       required: ['number'],
@@ -147,14 +202,15 @@ export const mergeTools: ToolDefinition[] = [
     name: TOOL_UPDATE_BRANCH,
     description:
       'Bring a pull request’s head branch up to date by merging its base into it (GitHub’s ' +
-      '"Update branch"). GitHub does the merge in the background; the head sha changes when it lands. ' +
-      'With `sha`, GitHub refuses if the head is no longer that commit.',
+      '"Update branch"). Only an open pull request into a base GITHUB_MERGE_BASE_ALLOW names, and never ' +
+      'when the head is itself a base branch. GitHub does the merge in the background; the head sha ' +
+      'changes when it lands. With `sha`, a head that has moved is refused.',
     inputSchema: {
       type: 'object',
       properties: {
         repo: REPO_PROPERTY,
         number: { type: 'integer', minimum: 1, description: 'Pull-request number' },
-        sha: { type: 'string', description: 'The head sha you expect the branch to be at' },
+        sha: { type: 'string', description: 'The head sha you expect the branch to be at (full, or 7+ hex digits)' },
       },
       required: ['number'],
     },
@@ -175,16 +231,10 @@ async function callMerge(name: string, args: Record<string, unknown>, ctx: ToolC
       }
 
       const pr = await ctx.api.getPullRequest(pull);
-      const blocked = notMergeable(pr);
+      const blocked = notMergeable(pr, 'merging');
       if (blocked) refuse(blocked);
       requireMergeBase(pr.base.ref, pull.repo, ctx);
-      if (expected !== undefined && expected.trim() !== pr.head.sha) {
-        refuse(
-          `the head of ${repoSlug(pull.repo)}#${pull.number} is ${field(pr.head.sha, FIELD.sha)}, not ` +
-            `${echo(expected, FIELD.sha)}: it moved since it was read. Read it again (and its reviews and ` +
-            `checks) before merging.`,
-        );
-      }
+      if (expected !== undefined) requireHeadSha(expected, pr);
 
       const result = await ctx.api.mergePullRequest(pull, { method, sha: pr.head.sha, title, message });
       if (!result.merged) {
@@ -196,17 +246,22 @@ async function callMerge(name: string, args: Record<string, unknown>, ctx: ToolC
           `into ${field(pr.base.ref)} by ${method}: ${field(result.sha, FIELD.sha)}`,
       ];
       if (deleteBranch) {
+        // The merge has happened whatever this does next, so a failed check
+        // or deletion is reported beside it rather than turning a successful
+        // merge into an error result. A repository that deletes merged
+        // branches itself answers 404 or 422 here, which is the same end state.
         const why = branchDeletionBlocked(pr, ctx);
         if (why) {
           out.push(`head branch kept: ${why}`);
         } else {
-          // The merge has happened whatever this does next, so a failed
-          // deletion is reported beside it rather than turning a successful
-          // merge into an error result. A repository that deletes merged
-          // branches itself answers 422 here, which is the same end state.
           try {
-            await ctx.api.deleteBranch(pull.repo, pr.head.ref);
-            out.push(`deleted branch ${field(pr.head.ref)}`);
+            const onGitHub = deletionBlockedOnGitHub(pr.head.ref, await ctx.api.branchFacts(pull.repo, pr.head.ref));
+            if (onGitHub) {
+              out.push(`head branch kept: ${onGitHub}`);
+            } else {
+              await ctx.api.deleteBranch(pull.repo, pr.head.ref);
+              out.push(`deleted branch ${field(pr.head.ref)}`);
+            }
           } catch (err) {
             out.push(`head branch not deleted: ${describeFailure('deleteBranch', err)}`);
           }
@@ -217,10 +272,25 @@ async function callMerge(name: string, args: Record<string, unknown>, ctx: ToolC
     case TOOL_UPDATE_BRANCH: {
       const pull = resolveThread(args, ctx, 'pull');
       const expected = optionalString(args, 'sha');
-      await ctx.api.updatePullRequestBranch(pull, expected?.trim());
+      // A merge commit onto the head branch is a write, so it takes a merge's
+      // fences: an open pull request into an allowed base, and a head that is
+      // not itself a base (on `dev → main`, this would merge main into dev).
+      const pr = await ctx.api.getPullRequest(pull);
+      const blocked = notMergeable(pr, 'updating');
+      if (blocked) refuse(blocked);
+      requireMergeBase(pr.base.ref, pull.repo, ctx);
+      if (baseBranches(pr, ctx).has(pr.head.ref)) {
+        refuse(
+          `the head of ${repoSlug(pull.repo)}#${pull.number}, ${echo(pr.head.ref)}, is a base branch here ` +
+            `(GITHUB_PR_BASE_ALLOW / GITHUB_MERGE_BASE_ALLOW); update_branch never writes to one`,
+        );
+      }
+      if (expected !== undefined) requireHeadSha(expected, pr);
+      await ctx.api.updatePullRequestBranch(pull, pr.head.sha);
       return toolResult(
-        `asked GitHub to merge the base of ${repoSlug(pull.repo)}#${pull.number} into its head branch; ` +
-          `it runs in the background, and get_pull_request shows the new head sha once it lands`,
+        `asked GitHub to merge ${field(pr.base.ref)} into ${field(pr.head.ref)} ` +
+          `(${repoSlug(pull.repo)}#${pull.number}, head ${field(pr.head.sha, FIELD.sha)}); it runs in the background, ` +
+          `and get_pull_request shows the new head sha once it lands`,
       );
     }
     default:

@@ -1,6 +1,6 @@
 {
   "name": "rayforce-clone",
-  "description": "An agent living in one GitHub repository: it wakes on issues, comments, pull requests, reviews and check results, and answers in the thread it was spoken to in. Runs as github-mcpl, an MCPL connector. Merges only into the bases its operator allows; never pushes.",
+  "description": "An agent living in one GitHub repository: it wakes on issues, comments, pull requests, reviews and check results, and answers in the thread it was spoken to in. Runs as github-mcpl, an MCPL connector. Merges only into the bases its operator allows; writes commits only through GitHub's pull-request merge and update-branch.",
   "url": "https://example.com/github-mcpl",
   "public": false,
   "hook_attributes": {
