@@ -399,6 +399,8 @@ function config(overrides: Partial<Config> = {}): Config {
     pollIntervalMs: 0,
     repos: [TEST_REPO],
     prBaseAllow: ['dev'],
+    mergeBaseAllow: [],
+    workflowAllow: [],
     stateFile: null,
     botLogin: 'rayforce-clone[bot]',
     maintainers: [],

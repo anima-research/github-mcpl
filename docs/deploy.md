@@ -139,11 +139,16 @@ deliberate choice, not an oversight:
   reads any file of any user. A second user there guards against accidents
   and costs upkeep (a sudo rule, a wrapper, logs the agent cannot see); it
   does not stop an agent that was talked into reading the key.
-- **What bounds a leaked key** is the App itself: installed on one
-  repository, `contents: read` (no push, no new branch), no merge tool, PR
-  bases checked against `GITHUB_PR_BASE_ALLOW`. The worst case is comments,
-  issues and reviews under the bot's name on that one repository. Revoke it
-  by generating a new key in the App's settings and deleting the old one.
+- **What bounds a leaked key** is the App itself: the repositories it is
+  installed on and the permissions it holds — not this server's allow-lists,
+  which a leaked key does not go through. With the manifest's permissions a
+  leaked key can write comments, issues and reviews, and — because
+  `contents: write` is what `resolve_thread` and merging need — push to any
+  branch that branch protection does not cover. So install the App on the
+  repositories it serves and no more, and protect every branch that matters
+  (require a pull request, and restrict who may push) on GitHub itself.
+  Revoke a key by generating a new one in the App's settings and deleting
+  the old one.
 - **Two agents on one host** each get their own unix user and home. A home is
   mode 750 by default on current Ubuntu, so one agent's
   `~/.config/github-mcpl` is not readable by the other.
