@@ -18,15 +18,18 @@ or several of one owner; one process per owner.
   rollback deletes the comments created after the checkpoint and restores the
   bodies of the ones edited after it. Nothing GitHub cannot undo is
   checkpointed, and nothing is granted that the host did not grant.
-- **No merge, ever.** Not in v1, not behind a flag. The base branch of any
-  pull request the server opens or retargets is checked against an allow-list.
+- **Merge only where the operator said so.** Merging is its own feature set,
+  `github.merge`, and it merges only into the bases `GITHUB_MERGE_BASE_ALLOW`
+  names — empty by default, so a deployment that never set it cannot merge
+  anything, whatever a host grants. The base of any pull request the server
+  opens or retargets is checked against `GITHUB_PR_BASE_ALLOW` the same way.
 
 Built on [`@animalabs/mcpl-core`](../mcpl-core-ts); sibling of
 [slack-mcpl](../slack-mcpl) and [telegram-mcpl](../telegram-mcpl).
 
 > **Status: v1, run end to end against a live GitHub App.** The server answers a
 > host's handshake in MCPL or in plain MCP, applies the grant it is given
-> (absence is denial), serves the twenty-two tools of the five tool feature
+> (absence is denial), serves the twenty-eight tools of the seven tool feature
 > sets, registers a channel per thread and publishes into one, checkpoints
 > every comment write and rolls it back, and turns a webhook delivery or a
 > poll pass into a `push/event` and a `channels/incoming` with tags and wake
@@ -70,7 +73,7 @@ install -d -m 700 ~/.config/github-mcpl
 ### 3. Create the GitHub App from the manifest
 
 [`app-manifest.json`](app-manifest.json) is a GitHub App manifest: it names
-the five permissions the tools need and the eight events the ingress
+the five permissions the default tools need and the eight events the ingress
 understands, so you do not have to tick 40 checkboxes correctly. GitHub's
 manifest flow is three steps — post the manifest, catch the code GitHub sends
 back, exchange the code for the App's credentials — and the third is the one
@@ -241,6 +244,8 @@ told where Node is instead of looking.
 | `GITHUB_POLL_INTERVAL_MS` | no | `0` (off) | Polling fallback: issues and PRs, issue comments and review comments updated since each list's cursor, plus the checks on the heads of the open PRs seen. `0` is off; a non-zero value below `60000` is refused. Partial — it cannot see a submitted review, a review request or a push ([what polling misses](docs/deploy.md#option-3--polling-only-no-webhook-at-all)) — and it is not meant to run alongside the webhook. |
 | `GITHUB_REPOS` | yes | — | Comma-separated `owner/name` allow-list; a write anywhere else is refused by name. Several entries must share one owner (one App installation, one token); a second owner is a second server process. With several, every tool call names its repository. |
 | `GITHUB_PR_BASE_ALLOW` | no | empty = no PR target allowed | Branches a pull request may target or be retargeted to. A plain `branch` applies to every repository, `owner/name:branch` to that one: `anima-research/rayforce:dev,main`. |
+| `GITHUB_MERGE_BASE_ALLOW` | no | empty = no merge | Branches `merge_pull_request` may merge into, in the same format. Naming a branch here is what turns merging on; granting `github.merge` alone does not. |
+| `GITHUB_WORKFLOW_ALLOW` | no | empty = no dispatch or re-run | Workflow files (`review.yml`, or `owner/name:review.yml` for one repository) that `dispatch_workflow` and `rerun_workflow_run` may start. Never name a release or publish workflow you would not let the agent run. |
 | `GITHUB_STATE_FILE` | no | unset = in-memory only | Durable JSON: checkpoint lineage, rollback bookkeeping, and the polling state: a cursor for each repository and list (`pollCursors`), `lastPollAt` where a list with none starts, and the rows announced as new (`pollNew`). A list with a cursor of its own starts from it, not from `lastPollAt`. |
 | `GITHUB_BOT_LOGIN` | yes | — | The App's bot login, e.g. `rayforce-clone[bot]`. From-self and mention detection depend on it. |
 | `GITHUB_MAINTAINERS` | no | empty | Comma-separated logins marked `isMaintainer` in metadata and tagged `github:actor=maintainer`. |
@@ -330,11 +335,13 @@ surface is checked at its own call — `channels.register` to announce a channel
 | Feature set | Tools | Rollback |
 | --- | --- | --- |
 | `github.events` | — (push events and `channels/incoming` delivery) | no |
-| `github.read` | `get_issue`, `get_pull_request`, `list_comments`, `list_review_threads`, `list_pull_request_files`, `get_check_runs`, `search_issues` | no |
+| `github.read` | `get_issue`, `get_pull_request`, `list_comments`, `list_review_threads`, `list_reviews`, `list_pull_request_files`, `get_check_runs`, `search_issues` | no |
 | `github.comments` | `comment`, `reply_in_thread`, `edit_own_comment`, `delete_own_comment`, `upsert_sticky_comment` | **yes** |
 | `github.review` | `create_review`, `resolve_thread`, `unresolve_thread` | no (GitHub cannot delete a review) |
 | `github.issues` | `create_issue`, `edit_issue`, `close_issue`, `reopen_issue` | no |
 | `github.pr` | `create_pull_request`, `edit_pull_request`, `request_review` | no |
+| `github.merge` | `merge_pull_request`, `update_branch` | no (a merge cannot be undone) |
+| `github.actions` | `list_workflow_runs`, `dispatch_workflow`, `rerun_workflow_run` | no |
 
 Notes worth knowing before you grant them:
 
@@ -344,8 +351,25 @@ Notes worth knowing before you grant them:
   `rayforce-audit` does with `<!-- rayforce-audit-failure-comment -->`.
 - `create_pull_request` and a base change in `edit_pull_request` refuse a base
   outside `GITHUB_PR_BASE_ALLOW`. Empty means no pull request may be opened.
-- `github.pr` has no merge tool and no branch deletion. There is nothing to
-  disable; the capability does not exist.
+- `github.pr` has no merge tool and no branch deletion: opening a pull request
+  and landing one are separate grants. `merge_pull_request` is
+  `github.merge`'s, and it refuses a base outside `GITHUB_MERGE_BASE_ALLOW`
+  (empty = no merge), a draft, a closed or merged pull request, and — given
+  `sha`, the head you reviewed — a head that has moved since. Branch
+  protection (required checks, approvals) stays GitHub's to enforce.
+  `delete_branch: true` deletes the merged head branch only when it lives in
+  the base repository and is not a base branch any allow-list names.
+- `update_branch` merges the base into a pull request's head branch, as
+  GitHub's "Update branch" button does.
+- `dispatch_workflow` and `rerun_workflow_run` act only on workflow files
+  `GITHUB_WORKFLOW_ALLOW` names (empty = none), and a dispatch runs only on a
+  base branch, so the workflow that runs is one that was reviewed and merged.
+  The use it was built for: a review workflow that ignores comments from bots
+  still takes a `workflow_dispatch` (`review.yml` with `{"pr-number": "12"}`).
+  `list_workflow_runs` is a read and is not fenced.
+- `list_reviews` reads every submitted review to the end — a pull request
+  that has been through many bot review rounds passes GitHub's first page
+  quickly, and the newest verdict is on the last one.
 - Every write tool refuses a repository outside `GITHUB_REPOS`, by name,
   before the call reaches GitHub.
 
@@ -410,7 +434,7 @@ reach metadata and never reach the model.
   other logins. A separate service user would not change that on a host where
   the agent has passwordless `sudo`, which is the usual agent host. What
   bounds a leaked key is the rest of this list: the repository allow-list, the
-  permissions below, no merge. Generating a new key in the App's settings and
+  permissions below, the merge and workflow allow-lists. Generating a new key in the App's settings and
   deleting the old one revokes it. [docs/deploy.md](docs/deploy.md#who-can-read-the-key)
   has the cases where isolation is real.
 - **An allow-list of repositories.** `GITHUB_REPOS` is required. Events from
@@ -422,7 +446,12 @@ reach metadata and never reach the model.
 - **A base allow-list.** `GITHUB_PR_BASE_ALLOW` is empty by default, which
   means no pull request may be opened or retargeted at all. For rayforce it is
   `dev`, so the release branch is unreachable even by mistake.
-- **No merge.** No tool merges, closes a release branch or deletes a branch.
+- **Merge and workflows are opt-in twice.** A host has to grant
+  `github.merge` or `github.actions`, *and* the operator has to name the
+  bases (`GITHUB_MERGE_BASE_ALLOW`) or the workflow files
+  (`GITHUB_WORKFLOW_ALLOW`) they may touch. Either alone does nothing. Keep
+  release branches out of both, and protect them on GitHub as well: branch
+  protection is the fence that holds even if the key leaks.
 - **Bodies from strangers are data, not instructions.** An issue body, a
   comment, a review and a check's output are text written by other people,
   reaching a model that holds a write token. The server forwards them as
@@ -430,12 +459,27 @@ reach metadata and never reach the model.
   prompt has to say so, and both example recipes do. Treat anyone who can
   open an issue on the repository as someone who can type into your agent's
   context.
-- **The permissions are the minimum the tools need:** `issues: write` (issue
-  tools and issue comments), `pull_requests: write` (PR tools, reviews,
-  review-comment replies, review-thread resolution), `contents: read` (file
-  lists and refs; never write), `checks: read` (check runs and conclusions),
-  `metadata: read` (mandatory for every App). No `administration`, no
-  `workflows`, no `members`, no OAuth user flow — the App acts only as itself.
+- **The permissions, by what needs them.** Grant the App only the rows for
+  the feature sets you enable; a tool whose permission is missing fails with
+  GitHub's 403 and nothing else breaks.
+
+  | Permission | Needed by |
+  | --- | --- |
+  | `metadata: read` | every App (mandatory) |
+  | `issues: write` | `github.issues`, issue comments |
+  | `pull_requests: write` | `github.pr`, `github.review`, review-comment replies, `list_reviews` |
+  | `checks: read` | `get_check_runs`, the check summary of `get_pull_request` |
+  | `contents: read` | file lists and refs |
+  | `contents: write` | `github.merge` (merge, update branch, delete the merged branch), and `resolve_thread` / `unresolve_thread`: GitHub refuses `resolveReviewThread` to an App that cannot write contents, whatever its pull-request permission |
+  | `workflows: write` | `merge_pull_request` and `update_branch` on a pull request that changes `.github/workflows/` (GitHub refuses an App that lacks it) |
+  | `actions: write` | `github.actions` (`actions: read` is enough for `list_workflow_runs` alone) |
+
+  [`app-manifest.json`](app-manifest.json) asks for the minimum surface:
+  everything above except `workflows` and `actions`, which only the opt-in
+  feature sets use. Add those two on the App's **Permissions** page when you
+  enable `github.merge` or `github.actions`, and accept the new permissions
+  on the installation. No `administration`, no `members`, no OAuth user flow
+  — the App acts only as itself.
 
 ## Limits in v1
 
@@ -447,7 +491,9 @@ reach metadata and never reach the model.
   the agent reads the log by following the URL as a human would, or does
   without. (RFC-005 references for logs and diffs are on the roadmap, not
   here.)
-- **No merge, no branch deletion, no release-branch write.**
+- **No push.** The App can merge a pull request and delete its merged head
+  branch, but no tool writes a commit, creates a branch or touches a branch
+  outside a pull request.
 - **Polling is no faster than 60 s** and cannot see pushes that touch no
   thread.
 - **No reactions, no labels, no assignees, no projects, no releases.**
@@ -473,7 +519,7 @@ the network.
 | `webhook.ts`, `poller.ts` | .3 | Ingress: signature-checked deliveries and repository since-polls become `NormalizedEvent`s; dedup; allow-list. |
 | `tags.ts`, `content.ts` | .4 | Pure functions: `tagsFor`, `renderEvent`, `renderThread`, `renderPullRequestSummary`, `renderChecks`, all bounded by `LIMITS`. |
 | `channels.ts` | .5 | Channel registry and descriptors, lazy registration, `channels/incoming`, `channels/publish`, typing as a no-op. |
-| `feature-sets.ts`, `tools-*.ts` | .6 | Feature-set declarations and the read, issues, pr and review tools. |
+| `feature-sets.ts`, `tools-*.ts` | .6 | Feature-set declarations and the read, issues, pr and review tools; the merge (`tools-merge.ts`) and actions (`tools-actions.ts`) tools came after v1. |
 | `tools-comments.ts`, `state.ts` | .7 | Comment tools including the sticky upsert; checkpoint lineage and rollback. |
 | `server.ts`, `index.ts` | .9 | Handshake, `featureSets/update`, tool routing, the event pipeline, plain-MCP mode. |
 

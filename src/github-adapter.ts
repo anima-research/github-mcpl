@@ -41,6 +41,7 @@ import {
   type ChecksSummary,
   type Comment,
   type Config,
+  type DispatchWorkflowInput,
   type CreateIssueInput,
   type CreatePullRequestInput,
   type CreateReviewInput,
@@ -52,20 +53,26 @@ import {
   type IssueSearchHit,
   type IssueState,
   type IssueStateReason,
+  type ListWorkflowRunsInput,
   type Logger,
+  type MergePullRequestInput,
+  type MergeResult,
   type PolledComment,
   type PolledIssue,
   type PollRead,
   type PullRequest,
   type PullRequestFile,
+  type PullRequestReview,
   type RepoRef,
   type ReviewState,
   type ReviewThread,
   type ReviewThreadComment,
   type SubmittedReview,
+  type SubmittedReviewState,
   type ThreadRef,
   type UpdateIssueInput,
   type UpdatePullRequestInput,
+  type WorkflowRun,
 } from './types.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -111,6 +118,15 @@ const CHECK_RUN_PAGE = 100;
  * rather than summarized from a prefix.
  */
 const CHECK_RUN_MAX_PAGES = 5;
+
+/**
+ * `list_reviews` pages: 100 reviews a page, at most this many pages. A pull
+ * request that has been through many bot review rounds passes GitHub's default
+ * page of 30 quickly, and the *latest* verdict is what a caller wants, so the
+ * read goes to the end rather than stopping at the first page.
+ */
+const REVIEW_PAGE = 100;
+const REVIEW_MAX_PAGES = 5;
 /**
  * Requests one `…Since` poll makes before it stops, past which it goes on
  * only to finish a second it is part way through, and leaves the rest for a
@@ -271,7 +287,11 @@ interface ApiPull {
   merged_at?: string | null;
   mergeable?: boolean | null;
   node_id?: string;
-  head?: { ref?: string | null; sha?: string | null } | null;
+  head?: {
+    ref?: string | null;
+    sha?: string | null;
+    repo?: { name?: string | null; owner?: { login?: string | null } | null } | null;
+  } | null;
   base?: { ref?: string | null; sha?: string | null } | null;
   user?: ApiActor | null;
   requested_reviewers?: Array<ApiActor | null> | null;
@@ -301,6 +321,32 @@ export interface CheckRunRow {
   name?: string;
   status?: string;
   conclusion?: string | null;
+  html_url?: string | null;
+}
+
+/** One row of `GET /repos/{o}/{r}/pulls/{n}/reviews`. */
+interface ApiReview {
+  id?: number;
+  user?: ApiActor | null;
+  state?: string | null;
+  body?: string | null;
+  commit_id?: string | null;
+  submitted_at?: string | null;
+  html_url?: string | null;
+}
+
+/** One row of `GET /repos/{o}/{r}/actions/runs`. */
+interface ApiWorkflowRun {
+  id?: number;
+  name?: string | null;
+  path?: string | null;
+  event?: string | null;
+  status?: string | null;
+  conclusion?: string | null;
+  head_branch?: string | null;
+  head_sha?: string | null;
+  run_attempt?: number | null;
+  created_at?: string | null;
   html_url?: string | null;
 }
 
@@ -368,6 +414,51 @@ function reviewStateOf(state: string | null | undefined): ReviewState {
   if (upper === 'APPROVED') return 'approved';
   if (upper === 'CHANGES_REQUESTED') return 'changes_requested';
   return 'commented';
+}
+
+/** A review's state as `GET …/reviews` spells it, including the two `reviewStateOf` folds away. */
+function submittedReviewStateOf(state: string | null | undefined): SubmittedReviewState {
+  const upper = (state ?? '').toUpperCase();
+  if (upper === 'APPROVED') return 'approved';
+  if (upper === 'CHANGES_REQUESTED') return 'changes_requested';
+  if (upper === 'DISMISSED') return 'dismissed';
+  if (upper === 'PENDING') return 'pending';
+  return 'commented';
+}
+
+function mapReview(data: ApiReview): PullRequestReview {
+  return {
+    id: data.id ?? 0,
+    author: actorOf(data.user),
+    state: submittedReviewStateOf(data.state),
+    body: data.body ?? '',
+    commitId: data.commit_id ?? '',
+    submittedAt: data.submitted_at ?? '',
+    html_url: data.html_url ?? '',
+  };
+}
+
+function mapWorkflowRun(data: ApiWorkflowRun): WorkflowRun {
+  return {
+    id: data.id ?? 0,
+    name: data.name ?? '',
+    path: data.path ?? '',
+    event: data.event ?? '',
+    status: data.status ?? '',
+    conclusion: data.conclusion ?? null,
+    headBranch: data.head_branch ?? '',
+    headSha: data.head_sha ?? '',
+    runAttempt: data.run_attempt ?? 1,
+    createdAt: data.created_at ?? '',
+    html_url: data.html_url ?? '',
+  };
+}
+
+/** The repository a head branch lives in, or null when GitHub no longer knows (a deleted fork). */
+function headRepoOf(head: ApiPull['head']): RepoRef | null {
+  const owner = head?.repo?.owner?.login;
+  const name = head?.repo?.name;
+  return owner && name ? { owner, name } : null;
 }
 
 function mapIssue(repo: RepoRef, data: ApiIssue): Issue {
@@ -1373,6 +1464,154 @@ export class GitHubAdapter implements GitHubApi {
   }
 
   // ───────────────────────────────────────────────────────────────────────────
+  // Reviews (read)
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Every review on a pull request, oldest first (GitHub's order). Paged to
+   * the end up to {@link REVIEW_MAX_PAGES} pages: the newest verdict is the one
+   * that matters and it is on the *last* page, so stopping at the first would
+   * answer with a stale one.
+   */
+  async listReviews(pull: ThreadRef): Promise<PullRequestReview[]> {
+    const rows: ApiReview[] = [];
+    for (let page = 1; page <= REVIEW_MAX_PAGES; page++) {
+      const batch = await this.call('listReviews', async () => {
+        const res = await this.octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews', {
+          owner: pull.repo.owner,
+          repo: pull.repo.name,
+          pull_number: pull.number,
+          per_page: REVIEW_PAGE,
+          page,
+        });
+        return (Array.isArray(res.data) ? res.data : []) as ApiReview[];
+      });
+      rows.push(...batch);
+      if (batch.length < REVIEW_PAGE) break;
+      if (page === REVIEW_MAX_PAGES) {
+        this.log('warn', 'listReviews: page bound reached; later reviews not read', {
+          repo: repoSlug(pull.repo),
+          number: pull.number,
+          read: rows.length,
+        });
+      }
+    }
+    return rows.map(mapReview);
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Merge
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * `PUT …/pulls/{n}/merge` with the head sha the caller read: GitHub answers
+   * 409 when the head has moved since, so a merge can never take a commit
+   * nobody looked at. 405 (not mergeable: a failing required check, a
+   * missing approval, a conflict) and 422 come back as they are.
+   */
+  async mergePullRequest(pull: ThreadRef, input: MergePullRequestInput): Promise<MergeResult> {
+    return this.call('mergePullRequest', async () => {
+      const res = await this.octokit.request('PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge', {
+        owner: pull.repo.owner,
+        repo: pull.repo.name,
+        pull_number: pull.number,
+        merge_method: input.method,
+        sha: input.sha,
+        ...(input.title !== undefined ? { commit_title: input.title } : {}),
+        ...(input.message !== undefined ? { commit_message: input.message } : {}),
+      });
+      const data = res.data as { merged?: boolean; sha?: string | null; message?: string | null };
+      return { merged: data.merged === true, sha: data.sha ?? '', message: data.message ?? '' };
+    });
+  }
+
+  async updatePullRequestBranch(pull: ThreadRef, expectedHeadSha?: string): Promise<void> {
+    await this.call('updatePullRequestBranch', async () => {
+      await this.octokit.request('PUT /repos/{owner}/{repo}/pulls/{pull_number}/update-branch', {
+        owner: pull.repo.owner,
+        repo: pull.repo.name,
+        pull_number: pull.number,
+        ...(expectedHeadSha !== undefined ? { expected_head_sha: expectedHeadSha } : {}),
+      });
+    });
+  }
+
+  async deleteBranch(repo: RepoRef, branch: string): Promise<void> {
+    await this.call('deleteBranch', async () => {
+      await this.octokit.request('DELETE /repos/{owner}/{repo}/git/refs/{ref}', {
+        owner: repo.owner,
+        repo: repo.name,
+        ref: `heads/${branch}`,
+      });
+    });
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Actions
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /** The newest runs first (GitHub's order), one page of at most `limit`. */
+  async listWorkflowRuns(repo: RepoRef, input: ListWorkflowRunsInput): Promise<WorkflowRun[]> {
+    const filters = {
+      per_page: Math.max(1, Math.min(input.limit, LIMITS.listEntries)),
+      ...(input.headSha !== undefined ? { head_sha: input.headSha } : {}),
+      ...(input.branch !== undefined ? { branch: input.branch } : {}),
+      ...(input.event !== undefined ? { event: input.event } : {}),
+    };
+    return this.call('listWorkflowRuns', async () => {
+      const res =
+        input.workflow === undefined
+          ? await this.octokit.request('GET /repos/{owner}/{repo}/actions/runs', {
+              owner: repo.owner,
+              repo: repo.name,
+              ...filters,
+            })
+          : await this.octokit.request('GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs', {
+              owner: repo.owner,
+              repo: repo.name,
+              workflow_id: input.workflow,
+              ...filters,
+            });
+      const data = res.data as { workflow_runs?: ApiWorkflowRun[] };
+      return (data.workflow_runs ?? []).slice(0, filters.per_page).map(mapWorkflowRun);
+    });
+  }
+
+  async getWorkflowRun(repo: RepoRef, runId: number): Promise<WorkflowRun> {
+    return this.call('getWorkflowRun', async () => {
+      const res = await this.octokit.request('GET /repos/{owner}/{repo}/actions/runs/{run_id}', {
+        owner: repo.owner,
+        repo: repo.name,
+        run_id: runId,
+      });
+      return mapWorkflowRun(res.data as ApiWorkflowRun);
+    });
+  }
+
+  async dispatchWorkflow(repo: RepoRef, input: DispatchWorkflowInput): Promise<void> {
+    await this.call('dispatchWorkflow', async () => {
+      await this.octokit.request('POST /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches', {
+        owner: repo.owner,
+        repo: repo.name,
+        workflow_id: input.workflow,
+        ref: input.ref,
+        inputs: input.inputs,
+      });
+    });
+  }
+
+  async rerunWorkflowRun(repo: RepoRef, runId: number, failedOnly: boolean): Promise<void> {
+    await this.call('rerunWorkflowRun', async () => {
+      await this.octokit.request(
+        failedOnly
+          ? 'POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs'
+          : 'POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun',
+        { owner: repo.owner, repo: repo.name, run_id: runId },
+      );
+    });
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
   // Polling fallback (contract amendment 1) and identity
   // ───────────────────────────────────────────────────────────────────────────
 
@@ -1585,6 +1824,7 @@ export class GitHubAdapter implements GitHubApi {
       mergeable: data.mergeable ?? null,
       head: { ref: data.head?.ref ?? '', sha: headSha },
       base: { ref: data.base?.ref ?? '', sha: data.base?.sha ?? '' },
+      headRepo: headRepoOf(data.head),
       author: actorOf(data.user),
       requestedReviewers: (data.requested_reviewers ?? [])
         .map((r) => r?.login ?? '')

@@ -980,6 +980,164 @@ test('pull request create, retarget, reviewers — and the draft flag through Gr
   assertNoTokenLeak(r);
 });
 
+test('merge, update-branch and branch deletion hit their REST paths with the head sha guard', async () => {
+  const r = await rig();
+  const p = '/repos/anima-research/rayforce';
+  r.fake
+    .on(`PUT ${p}/pulls/12/merge`, { body: { merged: true, sha: 'beef'.padEnd(40, '0'), message: 'Pull Request successfully merged' } })
+    .on(`PUT ${p}/pulls/12/update-branch`, { status: 202, body: { message: 'Updating pull request branch.' } })
+    .on(`DELETE ${p}/git/refs/heads%2Ffix%2Fthing`, { status: 204 })
+    .on(`DELETE ${p}/git/refs/heads/fix/thing`, { status: 204 });
+
+  const merged = await r.adapter.mergePullRequest(PULL, { method: 'squash', sha: HEAD_SHA, title: 'Fix it (#12)' });
+  assert.deepEqual(r.fake.for(`PUT ${p}/pulls/12/merge`)[0].body, {
+    merge_method: 'squash',
+    sha: HEAD_SHA,
+    commit_title: 'Fix it (#12)',
+  });
+  assert.deepEqual(merged, { merged: true, sha: 'beef'.padEnd(40, '0'), message: 'Pull Request successfully merged' });
+
+  await r.adapter.updatePullRequestBranch(PULL, HEAD_SHA);
+  assert.deepEqual(r.fake.for(`PUT ${p}/pulls/12/update-branch`)[0].body, { expected_head_sha: HEAD_SHA });
+  await r.adapter.updatePullRequestBranch(PULL);
+  assert.deepEqual(r.fake.for(`PUT ${p}/pulls/12/update-branch`)[1].body, {}, 'no guard when none was given');
+
+  await r.adapter.deleteBranch(REPO, 'fix/thing');
+  const deletes = r.fake.calls.filter((c) => c.method === 'DELETE' && c.path.startsWith(`${p}/git/refs/`));
+  assert.equal(deletes.length, 1);
+  // The branch name may arrive with its slashes encoded or not; it must name
+  // exactly refs/heads/fix/thing either way.
+  assert.equal(decodeURIComponent(deletes[0].path), `${p}/git/refs/heads/fix/thing`);
+  assertNoTokenLeak(r);
+});
+
+test('a 405 from the merge endpoint is the caller’s error, with GitHub’s reason', async () => {
+  const r = await rig();
+  r.fake.on('PUT /repos/anima-research/rayforce/pulls/12/merge', {
+    status: 405,
+    body: { message: 'Required status check "ci" is expected.' },
+  });
+  await assert.rejects(r.adapter.mergePullRequest(PULL, { method: 'merge', sha: HEAD_SHA }), (err: unknown) => {
+    assert.ok(err instanceof GitHubApiError);
+    assert.equal(err.status, 405);
+    assert.equal(err.operation, 'mergePullRequest');
+    assert.match(err.message, /Required status check/);
+    return true;
+  });
+});
+
+test('listReviews pages to the end, so the newest verdict is never cut off', async () => {
+  const r = await rig();
+  const review = (id: number, state: string) => ({
+    id,
+    user: { login: id % 2 ? 'github-actions[bot]' : 'maintainer', type: id % 2 ? 'Bot' : 'User' },
+    state,
+    body: `review ${id}`,
+    commit_id: HEAD_SHA,
+    submitted_at: '2026-10-01T00:00:00Z',
+    html_url: `https://github.com/x#pullrequestreview-${id}`,
+  });
+  r.fake.on('GET /repos/anima-research/rayforce/pulls/12/reviews', (req) =>
+    req.query.page === '1'
+      ? { body: Array.from({ length: 100 }, (_, i) => review(i + 1, 'COMMENTED')) }
+      : { body: [review(101, 'DISMISSED'), review(102, 'APPROVED')] },
+  );
+  const reviews = await r.adapter.listReviews(PULL);
+  const asked = r.fake.for('GET /repos/anima-research/rayforce/pulls/12/reviews');
+  assert.deepEqual(
+    asked.map((c) => [c.query.per_page, c.query.page]),
+    [
+      ['100', '1'],
+      ['100', '2'],
+    ],
+  );
+  assert.equal(reviews.length, 102);
+  assert.deepEqual(reviews.at(-1), {
+    id: 102,
+    author: { login: 'maintainer', isBot: false },
+    state: 'approved',
+    body: 'review 102',
+    commitId: HEAD_SHA,
+    submittedAt: '2026-10-01T00:00:00Z',
+    html_url: 'https://github.com/x#pullrequestreview-102',
+  });
+  assert.equal(reviews.at(-2)?.state, 'dismissed');
+});
+
+test('workflow runs: list by repo or by workflow file, read one, dispatch, re-run', async () => {
+  const r = await rig();
+  const p = '/repos/anima-research/rayforce/actions';
+  const run = {
+    id: 9001,
+    name: 'Review',
+    path: '.github/workflows/review.yml',
+    event: 'workflow_dispatch',
+    status: 'completed',
+    conclusion: 'success',
+    head_branch: 'main',
+    head_sha: HEAD_SHA,
+    run_attempt: 2,
+    created_at: '2026-10-02T00:00:00Z',
+    html_url: 'https://github.com/anima-research/rayforce/actions/runs/9001',
+  };
+  r.fake
+    .on(`GET ${p}/runs`, { body: { total_count: 1, workflow_runs: [run] } })
+    .on(`GET ${p}/workflows/review.yml/runs`, { body: { total_count: 1, workflow_runs: [run] } })
+    .on(`GET ${p}/runs/9001`, { body: run })
+    .on(`POST ${p}/workflows/review.yml/dispatches`, { status: 204 })
+    .on(`POST ${p}/runs/9001/rerun`, { status: 201, body: {} })
+    .on(`POST ${p}/runs/9001/rerun-failed-jobs`, { status: 201, body: {} });
+
+  const all = await r.adapter.listWorkflowRuns(REPO, { headSha: HEAD_SHA, limit: 5 });
+  assert.deepEqual(r.fake.for(`GET ${p}/runs`)[0].query, { per_page: '5', head_sha: HEAD_SHA });
+  assert.deepEqual(all, [
+    {
+      id: 9001,
+      name: 'Review',
+      path: '.github/workflows/review.yml',
+      event: 'workflow_dispatch',
+      status: 'completed',
+      conclusion: 'success',
+      headBranch: 'main',
+      headSha: HEAD_SHA,
+      runAttempt: 2,
+      createdAt: '2026-10-02T00:00:00Z',
+      html_url: 'https://github.com/anima-research/rayforce/actions/runs/9001',
+    },
+  ]);
+
+  await r.adapter.listWorkflowRuns(REPO, { workflow: 'review.yml', branch: 'main', event: 'workflow_dispatch', limit: 500 });
+  assert.deepEqual(r.fake.for(`GET ${p}/workflows/review.yml/runs`)[0].query, {
+    per_page: '50',
+    branch: 'main',
+    event: 'workflow_dispatch',
+  });
+
+  assert.equal((await r.adapter.getWorkflowRun(REPO, 9001)).path, '.github/workflows/review.yml');
+
+  await r.adapter.dispatchWorkflow(REPO, { workflow: 'review.yml', ref: 'main', inputs: { 'pr-number': '12' } });
+  assert.deepEqual(r.fake.for(`POST ${p}/workflows/review.yml/dispatches`)[0].body, {
+    ref: 'main',
+    inputs: { 'pr-number': '12' },
+  });
+
+  await r.adapter.rerunWorkflowRun(REPO, 9001, false);
+  await r.adapter.rerunWorkflowRun(REPO, 9001, true);
+  assert.equal(r.fake.for(`POST ${p}/runs/9001/rerun`).length, 1);
+  assert.equal(r.fake.for(`POST ${p}/runs/9001/rerun-failed-jobs`).length, 1);
+  assertNoTokenLeak(r);
+});
+
+test('a pull request carries the repository its head branch lives in', async () => {
+  const r = await rig();
+  r.fake.on('GET /repos/anima-research/rayforce/pulls/12', {
+    body: { ...PULL_PAYLOAD, head: { ...PULL_PAYLOAD.head, repo: { name: 'rayforce', owner: { login: 'a-fork' } } } },
+  });
+  assert.deepEqual((await r.adapter.getPullRequest(PULL)).headRepo, { owner: 'a-fork', name: 'rayforce' });
+  r.fake.on('GET /repos/anima-research/rayforce/pulls/12', { body: { ...PULL_PAYLOAD, head: { ...PULL_PAYLOAD.head, repo: null } } });
+  assert.equal((await r.adapter.getPullRequest(PULL)).headRepo, null, 'a deleted fork is null, not a guess');
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Polling fallback (contract amendment 1)
 // ─────────────────────────────────────────────────────────────────────────────
