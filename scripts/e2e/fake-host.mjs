@@ -1,28 +1,19 @@
 #!/usr/bin/env node
 /**
- * A scripted MCPL host for the WP10 end-to-end run (TASK-SRHKG.1.10).
+ * A scripted MCPL host: it spawns the built server, speaks MCPL JSON-RPC over
+ * its stdio, grants every capability the manifest declares, and records every
+ * request the server sends so a scenario can assert on it.
  *
- * It is the host side of `test/harness.ts`, moved off an in-memory stream pair
- * and onto a child process's stdio: it spawns the built server
- * (`node dist/src/index.js --stdio`), speaks MCPL JSON-RPC (newline-delimited,
- * one object per line) over that pipe, grants every capability the manifest
- * declares, answers every request a conforming host answers, and records
- * every inbound request so a scenario can assert on tags and metadata.
+ * It reads no environment value itself; the child inherits the environment
+ * untouched. `--log <file>` appends the transcript, every command but `quit`,
+ * the server's notifications and the child's stderr to that file, and the
+ * server's stderr can name the installation id.
  *
- * It carries NO credentials. The App id, the private key path and the state
- * file come from the environment the operator sourced before running it, and
- * are inherited by the child untouched; this script never reads, prints or
- * logs an environment value. The one line it prints about the child is its
- * exit status.
- *
- * Operator interface: one JSON command per line on stdin, one JSON result per
- * line on stdout, so a scenario is a file of commands and its transcript is
- * the evidence. `--log <file>` additionally appends every frame in both
- * directions, plus the child's stderr, to a durable log.
+ * One JSON command per line on stdin, one JSON result per line on stdout:
  *
  *   {"cmd":"call","name":"comment","args":{...}}        tools/call
  *   {"cmd":"publish","params":{...}}                    channels/publish (Request)
- *   {"cmd":"notify-publish","params":{...}}             channels/publish (Notification, §14.3)
+ *   {"cmd":"notify-publish","params":{...}}             channels/publish (Notification)
  *   {"cmd":"checkpoint"}                                state/checkpoint
  *   {"cmd":"rollback","params":{...}}                   state/rollback
  *   {"cmd":"tools"}                                     tools/list
@@ -34,26 +25,20 @@
  *   {"cmd":"sleep","ms":1000}
  *   {"cmd":"quit"}                                      shut the child down
  *
- * `wait` resolves on the first *recorded* request matching `method` (and, when
- * given, whose JSON contains the `contains` substring) — including one that
- * arrived before the wait was issued, so a scenario never races the poller.
+ * `wait` resolves on the first recorded request matching `method` (and, when
+ * given, whose JSON contains `contains`), including one that arrived before
+ * the wait was issued.
  *
- * **A fulfilled RPC is not the same as a successful one.** JSON-RPC answers a
- * refused tool call with a *result* carrying `isError`, not with an error
- * object, so a host that reports "ok" for every answered request calls a
- * refusal a pass — which is how a scenario can look green while the connector
- * declined to do it. Every command is therefore judged on its result
- * ({@link verdictOf}): `isError` on a tool result, `delivered: false` on a
- * publish, and `success: false` or a non-empty `notUndone` on a rollback
- * receipt are all failures.
+ * A tool call the connector refuses comes back as a result carrying `isError`,
+ * not as a JSON-RPC error, so results are judged: `isError` fails any command,
+ * and so do `delivered: false` from `publish` and `success: false` or a
+ * non-empty `notUndone` from `rollback`.
  *
- * Add `"expectError": true` to a command whose refusal *is* the scenario (a
- * base outside the allow-list). Then a refusal is the pass and a success is
- * the failure. Two things it never excuses, because neither is the connector
- * answering: a timeout, and the child exiting underneath the command.
+ * `"expectError": true` marks a command whose refusal is the scenario: a
+ * refusal passes and a success fails. A timeout, or the child exiting under
+ * the command, fails either way.
  *
- * Any failure sets the process exit status to 1, so a scenario file cannot
- * pass by being read without being checked.
+ * Any failure sets the exit status to 1.
  */
 
 import { spawn } from 'node:child_process';
@@ -134,13 +119,8 @@ const child = spawn(command, args, {
 createInterface({ input: child.stderr }).on('line', (line) => trace({ dir: 'stderr', line }));
 
 /**
- * The child's exit, kept from the moment it is spawned.
- *
- * Taken here and not inside `quit()`: `child.once('exit')` registered after
- * the child has already gone never fires, so a shutdown that asked for it
- * then would wait forever for an event that happened while it was not
- * looking. A promise created now is already settled by then and resolves at
- * once.
+ * Kept from the moment the child is spawned: `child.once('exit')` registered
+ * after the child has gone never fires.
  */
 let exitInfo = null;
 /**
@@ -430,12 +410,8 @@ function isFatal(err) {
 }
 
 /**
- * Did this command fail because the server is no longer there?
- *
- * The stream closing usually beats the `exit` event, so a child that dies
- * under a command surfaces as mcpl-core's `Connection closed` rather than as
- * the exit this host is watching for. Both mean the same thing, and both have
- * to stop the run: every command after them would report it again.
+ * The stream closing usually beats the `exit` event, so a child that dies under
+ * a command surfaces as mcpl-core's `Connection closed`.
  */
 function isGone(err) {
   return err?.fatal === true || /connection closed/i.test(String(err?.message ?? err));

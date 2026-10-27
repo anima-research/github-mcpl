@@ -150,9 +150,8 @@ export function describeFailure(toolName: string, err: unknown): string {
 }
 
 /**
- * Run one tool body. Every refusal, malformed call and GitHub error comes back
- * as an error *result* the model can read (slack-mcpl's convention), never as
- * a thrown protocol error: the call was permitted, it just did not happen.
+ * A refusal, a malformed call or a GitHub error comes back as an error result
+ * the model can read, not as a JSON-RPC error.
  */
 export async function runTool(
   tool: string,
@@ -285,24 +284,13 @@ export function requireAllowedRepo(repo: RepoRef, allowed: readonly RepoRef[]): 
 export type Parsed<T> = { ok: true; value: T } | { ok: false; error: string };
 
 /**
- * Which issue or pull request a call acts on, from every form the two tool
- * families accept:
- *
- *   - `12` or `"12"` or `"#12"` — the number, in the one repository
- *     GITHUB_REPOS names; with several, the repository has to be spelled;
- *   - `"owner/name#12"` and `"github:owner/name#12"` — the channel id's own
- *     spelling, so a thread can be named exactly as an event named it;
- *   - `{ owner, name, number, kind }`, or `{ repo: "owner/name", number }`,
- *     or `{ repo: "name", number }`.
- *
- * `kindDefault` applies when the form carries no `kind`; `issue` is also the
- * REST path issue comments take on a pull request. The repository allow-list
- * is **not** checked here — the two callers report a refusal differently (a
- * thrown {@link ToolRefusal} for .6, an error *result* for .7) — so each one
- * calls {@link requireAllowedRepo} itself.
- *
- * Returns the refusal message rather than throwing, because .7's tools answer
- * a malformed `thread` with an error result the model can read.
+ * The `thread` forms the tools accept: `12`, `"12"` or `"#12"` in the one
+ * repository GITHUB_REPOS names; `"owner/name#12"` or `"github:owner/name#12"`,
+ * the channel id's spelling; `{ owner, name, number, kind }` and
+ * `{ repo: "owner/name", number }`; and `{ repo: "name", number }`, which
+ * takes its owner from the one repository GITHUB_REPOS names. Without a
+ * `kind`, `kindDefault` applies; issue comments on a pull request take the
+ * `issue` path in GitHub's REST API.
  */
 export function parseThread(
   raw: unknown,

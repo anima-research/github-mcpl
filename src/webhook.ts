@@ -1,21 +1,10 @@
 /**
- * Webhook ingress (TASK-SRHKG.1.3, §Ingress).
- *
- * A plain `node:http` server on GITHUB_WEBHOOK_PORT and GITHUB_WEBHOOK_PATH.
- * The order of the checks is the security property, so it is spelled out
- * once here and followed exactly in {@link WebhookListener.handle}:
- *
- *   1. method and path                → 405 / 404
- *   2. body read with a 1 MiB cap     → 413, socket destroyed
- *   3. `X-Hub-Signature-256` over the *raw bytes*, constant-time → 401
- *   4. `X-GitHub-Delivery` dedup against a ring of the last 2000 ids → 200
- *   5. `ping`                         → 200, nothing emitted
- *   6. 2xx **sent**, then: parse, repo allow-list, normalize, listener
- *
- * Nothing before step 3 parses the body, and nothing before step 3 touches
- * the dedup ring — an unsigned request can neither be interpreted nor evict
- * a real delivery id. The webhook secret is held in a closure, never logged,
- * and never put in a response body.
+ * The webhook endpoint answers 405 or 404 for another method or path, 413 past
+ * a 1 MiB body (destroying the socket), 401 for a bad `X-Hub-Signature-256`,
+ * 400 without `X-GitHub-Delivery` or `X-GitHub-Event`, 200 for a delivery id
+ * among the last 2,000 or a `ping`, and 202 before it handles anything else.
+ * Nothing parses the body or touches the delivery ring before the signature
+ * is checked.
  */
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
@@ -259,7 +248,8 @@ export class WebhookListener {
       return;
     }
 
-    // 5. GitHub's own reachability check.
+    // GitHub's `ping` checks that the endpoint is reachable; it carries no
+    // event.
     if (event === 'ping') {
       this.logger.info('webhook ping answered', { delivery });
       respond(res, 200, 'pong');
@@ -281,10 +271,9 @@ export class WebhookListener {
   }
 
   /**
-   * HMAC-SHA256 over the raw body, compared in constant time. A missing,
-   * misprefixed or wrong-length header is rejected without a compare (there
-   * is nothing of equal length to compare against, and the length of a
-   * signature is not a secret).
+   * GitHub signs the raw body with HMAC-SHA256 as `sha256=<hex>`. A header of
+   * the wrong form or length is refused before the constant-time compare, since
+   * a signature's length isn't secret.
    */
   private signatureValid(provided: string | undefined, body: Buffer): boolean {
     if (!provided || !provided.startsWith(SIGNATURE_PREFIX)) return false;

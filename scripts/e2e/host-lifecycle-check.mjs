@@ -27,6 +27,7 @@ import * as path from 'node:path';
 
 const HOST = path.join(import.meta.dirname, 'fake-host.mjs');
 const workspace = mkdtempSync(path.join(tmpdir(), 'github-mcpl-host-check-'));
+const IDLE_BEFORE_INPUT_MS = 400;
 
 /**
  * A stub server, parameterised by how it misbehaves.
@@ -63,14 +64,6 @@ setInterval(() => {}, 1000);
   return file;
 }
 
-/**
- * Run the host against `server`, closing its stdin the way `closing` says.
- *
- * `quit` sends the command; `eof` just closes the pipe. Either way the input
- * is delayed, so the stub has a window to misbehave while the host sits idle
- * on stdin with nothing in flight — which is the state round 3's finding 3
- * was about and which a command sent immediately would hide.
- */
 function run(server, closing, extra = []) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [HOST, '--server', server, '--shutdown-grace', '700', ...extra], {
@@ -86,7 +79,7 @@ function run(server, closing, extra = []) {
     setTimeout(() => {
       if (closing === 'quit') child.stdin.write('{"cmd":"quit"}\n');
       child.stdin.end();
-    }, 400);
+    }, IDLE_BEFORE_INPUT_MS);
     child.on('exit', (code) => {
       const lines = out
         .split('\n')

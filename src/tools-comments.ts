@@ -172,18 +172,8 @@ interface FoundComment {
 }
 
 /**
- * Find `commentId` on `thread`, on the endpoint the caller named.
- *
- * GitHub numbers issue comments (`issues/comments/{id}`) and review comments
- * (`pulls/comments/{id}`) from separate sequences, so one number can name one
- * of each on the same pull request — and `thread.kind` cannot tell them apart,
- * since a pull request carries comments of both kinds. So the endpoint is the
- * caller's to name:
- *
- *   - `review: true` looks only among the review conversations;
- *   - `review: false` only among the issue comments;
- *   - omitted looks on both and, when the id exists on both, refuses and says
- *     so rather than picking one and editing the wrong comment.
+ * GitHub numbers issue comments and review comments from separate sequences,
+ * so one id can name one of each on the same pull request.
  */
 async function findComment(
   thread: ThreadRef,
@@ -576,9 +566,9 @@ export interface RollbackEffect {
 }
 
 /**
- * The §8.6 response, plus the receipt the contract asks for: what was undone
- * and what was not. Extra result fields are explicitly tolerated (§8), so a
- * host that only knows `checkpoint`/`success`/`reason` still reads this.
+ * MCPL's rollback result, plus a receipt of what was undone and what wasn't.
+ * MCPL tolerates extra result fields, so a host that knows only `checkpoint`,
+ * `success` and `reason` still reads it.
  */
 export interface CommentRollbackResult extends StateRollbackResult {
   undone: RollbackItem[];
@@ -587,31 +577,15 @@ export interface CommentRollbackResult extends StateRollbackResult {
 
 /**
  * Undo the comment writes made after `params.checkpoint`, best effort: delete
- * what was created, restore the previous body of what was edited, and report
- * every action that failed and every delete that cannot be undone at all.
+ * what was created, and give each edited comment back the body it had at the
+ * checkpoint in one update. The receipt names every action that failed and
+ * every delete, which GitHub can't undo. A record naming a repository outside
+ * GITHUB_REPOS is reported as not undone and never executed. Whatever wasn't
+ * undone, deletes included, stays booked under the checkpoint, so a retry
+ * attempts it again and never reports a complete rollback over it.
  *
- * Three properties the receipt rests on:
- *
- *   - **The allow-list binds the undo.** A record naming a repository outside
- *     GITHUB_REPOS is reported, by name, as not undone — never executed.
- *   - **A comment is its repository, its id *and* its kind.** An issue comment
- *     and a review comment can share an id (they are numbered by different
- *     endpoints), so the dedup key carries `review` and so does every call.
- *   - **One restore per comment, to the oldest body in the range.** Several
- *     edits of one comment collapse into a single update to the body it had at
- *     the checkpoint; the intermediate bodies are never written, and a failure
- *     retains only that one target, so no retry can resurrect a body the
- *     checkpoint never named.
- *   - **An action that did not happen stays booked.** Whatever could not be
- *     undone is recorded again under the checkpoint before the result is
- *     flushed, so a retry attempts it once more and cannot report a completed
- *     rollback over a state that was never restored. A delete is booked again
- *     too: GitHub cannot restore it, so no retry of this checkpoint will ever
- *     be a full success, and the receipt keeps saying so.
- *
- * Throws {@link McplRpcError} -32005 for a checkpoint that is unknown or was
- * abandoned by an earlier rollback (§8.7) — the only outcome the §8.6 result
- * shape cannot express.
+ * Throws -32005 for a checkpoint that is unknown or that an earlier rollback
+ * abandoned, which MCPL's rollback result has no way to say.
  */
 export async function rollbackComments(
   params: StateRollbackParams,
@@ -686,13 +660,8 @@ export async function rollbackComments(
     }
   }
 
-  // One restore per comment: the body it had when the checkpoint was taken,
-  // which is the *oldest* previous body in the range. The plan is newest first,
-  // so the last record for an identity is the oldest one; the bodies in between
-  // are states the rollback never has to pass through, and writing them would
-  // be a detour whose failure could strand the comment on an intermediate
-  // version. `Map` keeps the first insertion's position and the last value, so
-  // this collapses the records without reordering the comments.
+  // A `Map` keeps a key's first position and its last value, and the plan is
+  // newest first, so each comment collapses to its oldest body in place.
   const targetEdit = new Map<string, (typeof plan.edited)[number]>();
   for (const edited of plan.edited) {
     targetEdit.set(idKey(edited.repo, edited.commentId, edited.review), edited);

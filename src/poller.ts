@@ -1,28 +1,6 @@
 /**
- * Polling ingress (TASK-SRHKG.1.3, §Ingress, as amended by contract
- * amendment 1).
- *
- * The contract's first draft polled `GET /notifications`; an App installation
- * token cannot read that endpoint, so the fallback asks the repository what
- * changed since its cursor instead — `listIssuesSince`,
- * `listIssueCommentsSince`, `listReviewCommentsSince` — and derives the check
- * state of the open pull-request heads it saw from `getCheckRuns`.
- *
- * Two properties the acceptance criteria name, and where they live:
- *
- *   - **The interval floor.** `effectiveIntervalMs` is never below
- *     `MIN_POLL_INTERVAL_MS` (60 s) and never below GITHUB_POLL_INTERVAL_MS;
- *     a server-sent `X-Poll-Interval` can only raise it, through
- *     {@link Poller.observePollInterval}.
- *   - **Record only after delivery.** The dedup ring is read once per pass
- *     and a key is written back only once its event has been handed to the
- *     listener without throwing, so a failed delivery is re-attempted on the
- *     next pass instead of being silently consumed. The cursors advance for
- *     the same reason: only when the whole pass delivered.
- *
- * Each repository's three lists keep a cursor of their own
- * ({@link PollCursor}), so a list whose read the page bound stopped reads on
- * from where it stopped, while the rest move to the start of the pass.
+ * An App installation token can't read `GET /notifications`, so polling asks
+ * each repository what changed since its cursor.
  */
 
 import {
@@ -58,20 +36,9 @@ import type { EventListener } from './webhook.js';
 
 /** Amendment 1: "at most 20 PRs per poll" get their check runs fetched. */
 export const MAX_CHECKED_PULLS_PER_POLL = 20;
+const HEAD_BACKLOG_DRAIN_PASSES = 10;
 
-/**
- * How many pull-request heads may wait for a check lookup at once.
- *
- * The backlog exists because the issue cursor is not a work queue: it moves
- * forward whether or not the check lookups it implied succeeded, so a head
- * whose lookup failed, or that the {@link MAX_CHECKED_PULLS_PER_POLL} cap cut
- * off, or whose runs had not finished yet, would otherwise be dropped and
- * never asked about again. At the 60 s floor and 20 lookups a pass, this many
- * heads drain in ten minutes; past it the oldest head is forgotten, which
- * bounds the backlog against a repository that updates pull requests faster
- * than the poller can check them.
- */
-export const MAX_HEAD_BACKLOG = 200;
+export const MAX_HEAD_BACKLOG = HEAD_BACKLOG_DRAIN_PASSES * MAX_CHECKED_PULLS_PER_POLL;
 
 /**
  * How many passes a head may report nothing — a failing lookup, or a sha with

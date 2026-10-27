@@ -24,12 +24,12 @@ import {
 } from '../src/types.js';
 import { FakeGitHubApi, TEST_BOT, TEST_REPO } from './harness.js';
 
+const NO_CHECKPOINT_STORE = undefined as unknown as StateStore;
+
 function ctx(api: FakeGitHubApi, over: Partial<ToolContext> = {}): ToolContext {
   return {
     api,
-    // Neither feature set is rollback-capable, so neither touches the
-    // checkpoint store; an attempt would throw here rather than pass quietly.
-    state: undefined as unknown as StateStore,
+    state: NO_CHECKPOINT_STORE,
     botLogin: TEST_BOT.login,
     repos: [TEST_REPO],
     prBaseAllow: ['dev'],

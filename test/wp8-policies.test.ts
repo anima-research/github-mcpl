@@ -1,19 +1,10 @@
 /**
- * The example recipes' wake policies, run through the host's own matcher.
+ * The example recipes' wake policies, run through agent-framework's own
+ * EventGate matcher: a wake policy set is ordered, first-match-wins, and
+ * `metadataTrue` is an OR-list.
  *
- * A wake policy set is ordered, first-match-wins, and `metadataTrue` is an
- * OR-list — three facts that make "obviously correct" orderings wrong in
- * ways only evaluation catches (review round 1: an `isOwnThread` wake placed
- * above the CI-success skip woke the agent on every green build of its own
- * pull request). So these tests do not re-implement the semantics: they load
- * `EventGate` from connectome's agent-framework and ask `probe()`, which is
- * the same matcher the host runs, side-effect-free and offline.
- *
- * agent-framework is not a dependency of this package — it is a sibling
- * checkout. When it cannot be found (a standalone clone, CI), these tests
- * skip with the paths they looked in; the contract checks in
- * wp8-docs.test.ts still run. Point GITHUB_MCPL_GATE_MODULE at
- * `dist/src/gate/event-gate.js` to force a location.
+ * agent-framework is not a dependency of this package, so these tests load it
+ * from a sibling checkout and skip when there is none.
  */
 
 import { strict as assert } from 'node:assert';
@@ -97,8 +88,7 @@ async function loadGate(): Promise<GateModule> {
 async function gateFor(recipeName: string): Promise<{ probe(info: GateEventInfo): GateDecision }> {
   const { EventGate } = await loadGate();
   return new EventGate({
-    // A fresh temp dir per gate: the constructor seeds gate.json there, and
-    // nothing in this test may touch a real agent's config.
+    // EventGate's constructor seeds gate.json at configPath.
     configPath: join(mkdtempSync(join(tmpdir(), 'github-mcpl-gate-')), 'gate.json'),
     initialConfig: recipe(recipeName).modules.wake,
     emitTrace: () => {},

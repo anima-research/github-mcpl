@@ -1,28 +1,7 @@
 /**
- * Event tags and wake metadata (TASK-SRHKG.1.4; contract section "Tags and
- * metadata"; MCPL RFC-001).
- *
- * Pure functions: `tagsFor(event, ctx)` takes a `NormalizedEvent` and what the
- * caller knows about the deployment, and returns the tag set plus the metadata
- * the host matches `metadataTrue` rules against. No I/O, no api calls — the
- * caller (.5 channels, .9 push/event) has already fetched everything.
- *
- * Two invariants this module exists to hold:
- *
- *   1. `chat:ambient` is never emitted beside `chat:mention` or `chat:reply`.
- *      RFC-001 §4.1 makes host-side closure additive (`chat:mention ⇒
- *      chat:addressed`), so an event carrying both umbrellas is not
- *      interpretable by a first-match-wins rule list.
- *   2. `chat:from-self` is emitted for exactly one login, `ctx.botLogin`.
- *      Another bot is `chat:from-bot`; a human is `chat:from-human`.
- *
- * On `chat:addressed`: the frozen contract enumerates the core tags this
- * server emits (`CORE_TAGS` in types.ts) and the umbrella is not among them.
- * RFC-001 §4.1 defines its expansion as normative *host* behaviour ("Hosts
- * MUST expand them"), and names direct emission and reliance on closure as
- * both conforming, so emitting only the specific tag keeps the emitted
- * vocabulary equal to the contract's list. Invariant 1 is what makes that
- * safe: closure can never produce `chat:addressed` beside `chat:ambient` here.
+ * MCPL RFC-001 §4.1: hosts expand `chat:mention` and `chat:reply` to
+ * `chat:addressed`, and a producer should not emit `chat:ambient` beside a tag
+ * that implies `chat:addressed`, so this module never does.
  */
 
 import type { TagOntology } from '@animalabs/mcpl-core';
@@ -84,13 +63,8 @@ function escapeRegExp(s: string): string {
 }
 
 /**
- * Does `body` @-mention the bot?
- *
- * A GitHub App's login is `name[bot]`, but GitHub writes the mention as
- * `@name` — and a human typing the full `@name[bot]` means the same thing. So
- * both spellings count. The lookbehind keeps `foo@name` (an email, a handle
- * inside a word) from matching, and the trailing boundary keeps `@name` from
- * matching `@name-other`.
+ * A GitHub App's login is `name[bot]`, but GitHub writes its mention as
+ * `@name`, so both spellings count.
  */
 export function mentionsBot(body: string | undefined, botLogin: string): boolean {
   if (!body || !botLogin) return false;
@@ -163,7 +137,7 @@ export function tagsFor(event: NormalizedEvent, ctx: GitHubTagContext): TagResul
   if (mentioned) tags.add('chat:mention');
   if (isReply) tags.add('chat:reply');
   if (!mentioned && !isReply) tags.add('chat:ambient');
-  // `chat:dm` never: GitHub has no 1:1 channel this server speaks on.
+  // `chat:dm` never: GitHub has no one-to-one channel.
 
   // ── Locus, lifecycle, content ──
   if (event.kind === 'review_comment.created' || event.kind === 'review_comment.edited') {
@@ -260,19 +234,9 @@ export const EMITTED_TAGS: readonly string[] = [...CORE_TAGS, ...GITHUB_TAGS];
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * This producer's tag ontology — a hint catalog, not a closed schema.
- *
- * Two rules it obeys deliberately:
- *
- *   - **No `implies` edge into `chat:*`.** RFC-001 §4.1: a producer-declared
- *     edge into the reserved namespace lets a server promote its own traffic
- *     into the band a consumer reserved for being spoken to. The core closure
- *     is the host's and is fixed by the spec; nothing here touches it.
- *   - **No suggested treatment that promotes ambient traffic.** The rules
- *     below only ever *lower* the treatment of unaddressed traffic (ambient,
- *     bot authors, own echoes, deletions). The single `immediate` rule is for
- *     CI failures on a thread the agent is already in — never for ambient.
- *     They are advisory either way (§5.2) and apply only on acceptance.
+ * MCPL RFC-001 §4.1: a producer's `implies` edge into `chat:*` would promote
+ * its own traffic into the band reserved for being addressed, so there is none.
+ * Suggested treatments are advisory (§5.2).
  */
 export const GITHUB_TAG_ONTOLOGY: TagOntology = {
   coreTags: [...CORE_TAGS],

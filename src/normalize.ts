@@ -312,8 +312,7 @@ export function normalizeWebhook(delivery: WebhookDelivery): NormalizedEvent[] {
           body: asString(review.body),
           html_url,
           // The commit the review was written against, which is not the PR's
-          // current head once the branch moved under the reviewer. Only an
-          // older payload without `commit_id` falls back to the head.
+          // current head once the branch moved under the reviewer.
           sha: asString(review.commit_id) ?? asString(at(pull, 'head', 'sha')),
           review: { id, state: reviewStateFrom(review.state) },
         },
@@ -409,12 +408,9 @@ function normalizeCheckSuite(base: EventBase, payload: unknown, actor: EventActo
 }
 
 /**
- * A single `check_run.completed`. Same kind as a suite (the contract names no
- * other), keyed on the run's head sha, with the run itself pre-listed in
- * `failed` when it failed — {@link resolveCheckEvents} then replaces that with the
- * whole sha's failures. A deployment subscribed to both events sees two
- * deliveries for one sha; they carry distinct delivery ids, so the dedup ring
- * does not merge them.
+ * GitHub delivers `check_suite` and `check_run` separately, each with its own
+ * delivery id, so a deployment subscribed to both sees two deliveries for one
+ * sha.
  */
 function normalizeCheckRun(base: EventBase, payload: unknown, actor: EventActor | undefined): NormalizedEvent[] {
   const run = asObject(at(payload, 'check_run'));
@@ -448,15 +444,8 @@ function normalizeCheckRun(base: EventBase, payload: unknown, actor: EventActor 
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * True when `at` is at or after `since` — both ISO-8601 instants.
- *
- * Compared as instants and not as strings: GitHub stamps a row
- * `2026-10-14T12:28:38Z` while a cursor is written with milliseconds
- * (`2026-10-14T12:28:38.000Z`, or `.500Z` from an older release), and
- * lexicographically `'Z'` (0x5A) sorts
- * *after* `'.'` (0x2E) — so a string compare calls the earlier instant the
- * later one. An unparseable stamp answers false, which is the fail-safe
- * direction: the row keeps the kind it had before amendment 2a.
+ * GitHub stamps a row without milliseconds while a cursor carries them, and
+ * `'Z'` sorts after `'.'`, so these compare as instants, not as strings.
  */
 export function atOrAfter(at: string, since: string): boolean {
   const a = Date.parse(at);
@@ -465,57 +454,9 @@ export function atOrAfter(at: string, since: string): boolean {
 }
 
 /**
- * An issue or pull-request row from `listIssuesSince`.
- *
- * A `since` query reports *that* a row changed, never *how* — there is no
- * action — so amendment 2a derives the one from the row's own `created_at`
- * against `since`, the start of the window the poller has not finished
- * reading (`PollCursor.since` in types.ts):
- *
- *   - **opened** when the row was created at or after `since` and the poller
- *     hasn't announced it as new already (`announced`): this pass is the
- *     first that could have seen it, so `issue.opened` / `pull.opened`. A
- *     row is read again inside its window after a stopped read, a refused
- *     delivery, or in the second a pass starts in, and `announced` keeps it
- *     from being opened twice.
- *   - otherwise an **issue** row is `issue.edited` (or `issue.closed`, below)
- *     when its state, title or body differs from what the last pass recorded
- *     for it ({@link polledMarker}), and is **dropped** when they do not. A
- *     comment bumps its issue's `updated_at`, and the comment row of the same
- *     pass already carries the change; re-announcing the issue beside it,
- *     attributed to the issue's author, woke the bot on its own comments
- *     (deviation D1 and the 2026-10-15 rehearsal in docs/e2e-report.md).
- *   - otherwise an open **pull-request** row is `pull.synchronize` when its
- *     head sha moved away from `previousHeadSha` (what the last pass recorded
- *     for it), and is **dropped** — null — when it did not. A pull request's
- *     row is touched by every comment on it, and those comment and
- *     review-comment rows are collected by the same pass and already carry
- *     the change; re-announcing the pull request beside each of them is the
- *     duplicate volume amendment 2a exists to stop. An unknown head (the
- *     adapter fetches at most `POLL_PR_HEAD_LIMIT` per pass) cannot be shown
- *     to have moved, so it drops the same way.
- *
- *     A *first* sighting — no `previousHeadSha`, because this poll state has
- *     never recorded one — counts as moved, so an open pull request older
- *     than the cursor arrives once as `pull.synchronize` rather than not at
- *     all. It is the honest half of a choice with no clean answer: the row
- *     was not opened now (so `pull.opened` would lie about when), and
- *     dropping it would leave a cold start blind to work already in flight.
- *     The cost is bounded and smaller than it sounds: a poller with no stored
- *     cursor queries from one interval back (`Poller.pollOnce`), so a first
- *     pass sees only the rows touched in that interval — one `synchronize` per
- *     pull request *updated in the last poll interval*, not one per pull
- *     request that happens to be open.
- *   - **closed** rows are `issue.closed` / `pull.closed`, whenever they were
- *     created, but only on the pass that sees the close: a closed row whose
- *     marker is unchanged is a comment's bump and is dropped. The actor is
- *     `closed_by` when the list carries it, so the bot's own close is
- *     from-self.
- *
- * A first sighting — no recorded marker — always counts as a change.
- *
- * The dedup key still carries `updated_at`, so a row that does survive this
- * arrives once per change.
+ * GitHub's `since` list says that a row changed, not how: it carries no
+ * action. A comment bumps its issue's or pull request's `updated_at` without
+ * changing the thread itself.
  */
 export function normalizePolledIssue(
   repo: RepoRef,
@@ -701,23 +642,8 @@ export function normalizePolledChecks(
 
 
 /**
- * §Ingress: a `checks.completed` event carries "the failed job names and URLs
- * (from check runs through `GitHubApi.getCheckRuns`)". The delivery that
- * triggered it names at most the one suite or job that just finished, so the
- * whole sha is looked up once per event — and that lookup is also what decides
- * whether the event is ready at all (rule 2):
- *
- *   - **settled** (every run finished): the summary replaces `checks`, so the
- *     event carries every failed job on the sha and not just this suite's.
- *   - **still running** (runs exist, no conclusion yet): the event is *held
- *     back*. Another suite is about to finish and GitHub will deliver again;
- *     emitting now would report a conclusion that is about to change and
- *     would spend the sha's one emission on a partial job list.
- *   - **no runs known** (`total === 0`) or **the lookup failed**: the event
- *     goes out as the payload had it. A check event without job names still
- *     wakes a recipe, and there is nothing better to wait for.
- *
- * Non-checks events pass through untouched.
+ * A check delivery names only the suite or job that just finished, so the
+ * whole sha's runs are read here.
  */
 export async function resolveCheckEvents(
   events: readonly NormalizedEvent[],

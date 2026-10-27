@@ -1,13 +1,6 @@
-// Runs as npm's `version` lifecycle hook (see package.json): at that point
-// package.json already carries the new version, and files staged here are
-// included in the release commit that `npm version` then creates and tags.
-//
-// Folds the pending fragments in changelog.d/ (one file per change,
-// `<slug>.<breaking|added|changed|fixed>.md`) together with anything filed
-// directly under the standing `## Unreleased` section into a new
-// `## X.Y.Z — YYYY-MM-DD` section, deletes the consumed fragments, and
-// leaves a fresh empty `## Unreleased` above it. Refuses to release when
-// there is nothing to release, or when the input's shape is ambiguous.
+// Runs as npm's `version` lifecycle hook: package.json already carries the
+// new version, and files staged here go into the release commit that
+// `npm version` then creates and tags.
 import {
   existsSync,
   readdirSync,
@@ -28,20 +21,15 @@ const HEADINGS = {
   fixed: "Fixed",
 };
 
-// Refusals throw and are reported at the entry point, which then lets the
-// process end on its own with exitCode 1. process.exit() would race the
-// stderr write when stderr is a pipe (asynchronous on macOS), leaving the
-// caller a bare failure status with no reason attached.
+// Refusals throw and set exitCode rather than calling process.exit(), which
+// can cut off a stderr write still pending: Node writes to a pipe
+// asynchronously on POSIX.
 class ReleaseError extends Error {}
 const fail = (msg) => {
   throw new ReleaseError(msg);
 };
 
-// Fragment grammar: every non-blank line starts a bullet or continues one
-// (indented two or more spaces; nested bullets included). Headings and
-// thematic breaks are refused wherever they appear — at top level a '## '
-// line would splice a fake section boundary into the released changelog,
-// and as item content ('- ## x', '  ## x') they still render as headings.
+// A heading inside a list item still renders as a heading.
 const isBulletStart = (l) => /^[-*] /.test(l);
 const isContinuation = (l) => /^ {2,}\S/.test(l);
 const itemContent = (l) => l.replace(/^\s*(?:[-*]\s+)?/, "");

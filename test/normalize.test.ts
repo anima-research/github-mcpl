@@ -167,7 +167,7 @@ const EXPECTED: Record<string, Expectation> = {
         kind: 'review.submitted',
         thread: PULL_58,
         actor: { login: 'octocat', isBot: false },
-        // The commit reviewed, not the PR's current head (which is HEAD).
+        // The commit reviewed, not the pull request's current head.
         sha: FIRST_HEAD,
         review: { id: 2400000044, state: 'approved' },
       },
@@ -285,7 +285,7 @@ const EXPECTED: Record<string, Expectation> = {
       },
     ],
   },
-  // GitHub's reachability check: webhook.ts answers it, nothing is emitted.
+  // GitHub's ping checks the webhook's reachability; it carries no event.
   'ping.json': { events: [] },
   'issues.opened.foreign_repo.json': {
     events: [{ kind: 'issue.opened', thread: { repo: { owner: 'other-org', name: 'other-repo' }, number: 3, kind: 'issue' } }],
@@ -413,7 +413,8 @@ test('poll ids and dedup keys have the documented shape', () => {
 test('a polled issue row normalizes by state, and an edit keeps issue.edited', () => {
   const open = normalizePolledIssue(TEST_REPO, POLLED_ISSUE, RECEIVED_AT, SINCE);
   assert.ok(open);
-  // Created before the cursor: a poll cannot say which field changed.
+  // Created before the cursor: GitHub's list gives updated_at, not which
+  // field changed.
   assert.equal(open.kind, 'issue.edited');
   assert.equal(open.id, 'poll:issue:2100000001:2026-10-13T09:00:00Z');
   assert.deepEqual(open.thread, ISSUE_41);
@@ -446,9 +447,8 @@ test('an issue created at or after the cursor is issue.opened (amendment 2a)', (
 });
 
 test('created_at is compared as an instant, not as a string (amendment 2a)', () => {
-  // The regression a string compare produces: GitHub stamps the row without
-  // milliseconds, the cursor carries them, and `'Z'` > `'.'` lexicographically.
-  // 12:00:00Z is *before* 12:00:00.500Z and must read as an edit.
+  // GitHub stamps a row without milliseconds while the cursor carries them,
+  // and 'Z' sorts after '.', so 12:00:00Z must compare before 12:00:00.500Z.
   const row = { ...POLLED_ISSUE, createdAt: '2026-10-13T12:00:00Z' };
   const edited = normalizePolledIssue(TEST_REPO, row, RECEIVED_AT, '2026-10-13T12:00:00.500Z');
   assert.ok(edited);
@@ -497,8 +497,7 @@ test('an open pull-request row seen again is synchronize on a new head, and drop
   assert.equal(moved.kind, 'pull.synchronize');
   assert.equal(moved.sha, HEAD);
 
-  // Same head: the row was touched by a comment, which the pass collects as
-  // its own row. Nothing to announce here.
+  // Same head: a comment bumped the row's updated_at.
   assert.equal(normalizePolledIssue(TEST_REPO, row, RECEIVED_AT, SINCE, HEAD), null);
 
   // An unknown head cannot be shown to have moved, so it drops the same way.
@@ -519,9 +518,8 @@ test('a polled top-level comment carries its own id, a review comment does not (
   // id; a `since` row has always carried one, it was just thrown away.
   assert.deepEqual(normalizePolledComment(TEST_REPO, top, 'issue_comment', RECEIVED_AT).comment, { id: 2200000031 });
 
-  // A review comment's id stays in `reviewComment` alone: the two endpoints
-  // number their comments separately and an id from one must never be read as
-  // an id from the other.
+  // GitHub numbers issue comments and review comments separately, so an id
+  // from one endpoint must never be read as an id from the other.
   const review = normalizePolledComment(TEST_REPO, { ...top, path: 'src/lib.rs' }, 'review_comment', RECEIVED_AT);
   assert.equal(review.comment, undefined);
   assert.equal(review.reviewComment?.id, 2200000031);
@@ -941,9 +939,8 @@ test('resolveCheckEvents forwards the event unchanged when the lookup throws', a
 });
 
 test('resolveCheckEvents keeps the payload conclusion when the API knows no runs', async () => {
-  // The fake answers `{ total: 0 }` for an unseeded sha, the way a 200 with an
-  // empty list does; the payload is then all there is to go on, and holding
-  // the event back would mean never reporting it.
+  // GitHub answers a sha with no check runs with an empty list, as the fake
+  // does for an unseeded sha.
   const [event] = await resolveCheckEvents(normalizeWebhook(load('check_suite.completed.json')), new FakeGitHubApi());
   assert.equal(event.checks?.conclusion, 'failure');
   assert.deepEqual(event.checks?.failed, []);

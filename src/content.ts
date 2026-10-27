@@ -53,13 +53,9 @@ function textBlock(text: string): ContentBlock {
 }
 
 /**
- * A body, bounded with its own notice and otherwise byte-for-byte what GitHub
- * stored.
- *
- * Trimming is used to *detect* an empty body and nowhere else: leading
- * whitespace is Markdown (four spaces open an indented code block, two at the
- * end of a line are a hard break), so stripping it would silently rewrite the
- * author's text into something that renders differently.
+ * Leading and trailing whitespace is Markdown (four spaces open a code block,
+ * two at a line's end are a hard break), so a body is trimmed only to detect
+ * an empty one.
  */
 function body(text: string | undefined): string {
   const raw = text ?? '';
@@ -213,15 +209,12 @@ export function renderThread(thread: ThreadRef, comments: readonly Comment[]): C
 export function renderReviewThreads(threads: readonly ReviewThread[]): ContentBlock[] {
   if (threads.length === 0) return [textBlock('(no review threads)')];
   const rendered = list(threads, (t) => {
-    // Both identifiers, because they address different things: `t.id` is the
-    // GraphQL node id `resolve_thread`/`unresolve_thread` take, `rt:<root
-    // comment id>` is the channel thread id `reply_in_thread` takes. An agent
-    // reading this result needs each for a different tool.
+    // `t.id` is the GraphQL node id `resolve_thread` takes, and
+    // `rt:<root comment id>` is the id `reply_in_thread` takes.
     const state = t.isResolved ? 'resolved' : 'unresolved';
     const head = `${line(t.path, t.line)} (${t.side}) ${state} — thread ${t.id} (reply id rt:${t.comments[0]?.id ?? '?'})`;
     const comments = list(t.comments, (c) =>
-      // The body is not indented: an indent is Markdown, and this one is not
-      // the author's.
+      // Not indented: an indent is Markdown.
       [`  #${c.id} by ${actor(c.author)} at ${c.updatedAt ?? c.createdAt}`, body(c.body)].join('\n'),
     );
     return [head, ...comments].join('\n');

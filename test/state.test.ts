@@ -225,9 +225,9 @@ test('a damaged or foreign state file starts empty with one stderr line', () => 
   assert.deepEqual(GithubState.load(future, futureLog).lineage(), []);
   assert.match(futureLog.lines[0], /not a version 1 snapshot/);
 
-  // An absent file is the normal first start: no diagnostics at all.
   const fresh = capturingLogger();
-  assert.deepEqual(GithubState.load(tempFile(), fresh).lineage(), []);
+  const absent = tempFile();
+  assert.deepEqual(GithubState.load(absent, fresh).lineage(), []);
   assert.deepEqual(fresh.lines, []);
 });
 
@@ -252,7 +252,8 @@ test('the poll dedup ring remembers the last 2000 keys and no more', () => {
 
   assert.equal(state.seenPollKey('comment:1:t0'), false);
   assert.equal(state.seenPollKey('comment:1:t0'), true);
-  // A new updated_at is a new key: an edit of the same comment is not a replay.
+  // GitHub stamps an edit with a new updated_at, to the second, so an edit
+  // in a later second has a new key and isn't a replay.
   assert.equal(state.seenPollKey('comment:1:t1'), false);
 
   for (let i = 0; i < POLL_DEDUP_RING; i++) state.seenPollKey(`issue:${i}:t`);

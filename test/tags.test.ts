@@ -219,8 +219,7 @@ test('tags are deduplicated and namespaced', () => {
 // Closure rules
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** The kinds whose body is new text: the only ones a mention can address. */
-const TEXT_KINDS: readonly string[] = [
+const NEW_TEXT_KINDS: readonly string[] = [
   'issue.opened',
   'issue.edited',
   'pull.opened',
@@ -236,7 +235,7 @@ test('a close, reopen, push or new commits never count the mention in a body the
   // body, and its old mention woke the bot that had just closed it.
   for (const kind of NORMALIZED_EVENT_KINDS) {
     const { tags, metadata } = tagsFor(event(kind, { body: '@rayforce-clone please look' }), ctx());
-    const counts = TEXT_KINDS.includes(kind);
+    const counts = NEW_TEXT_KINDS.includes(kind);
     assert.equal(tags.includes('chat:mention'), counts, `${kind}: chat:mention`);
     assert.equal(metadata.mentioned, counts, `${kind}: metadata.mentioned`);
   }
@@ -252,7 +251,7 @@ test('chat:ambient never co-occurs with chat:mention or chat:reply, on any kind'
   for (const kind of NORMALIZED_EVENT_KINDS) {
     for (const [label, ctxOver, eventOver] of addressing) {
       // A mention alone addresses only the kinds that bring their text.
-      if (label === 'mention' && !TEXT_KINDS.includes(kind)) continue;
+      if (label === 'mention' && !NEW_TEXT_KINDS.includes(kind)) continue;
       const { tags } = tagsFor(event(kind, eventOver), ctx(ctxOver));
       const addressed = tags.includes('chat:mention') || tags.includes('chat:reply');
       assert.ok(addressed, `${kind} / ${label}: expected an addressed tag`);
@@ -481,9 +480,7 @@ test('every metadata string is bounded and no raw payload reaches metadata', () 
   ]));
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// The producer ontology (RFC-001 §5)
-// ─────────────────────────────────────────────────────────────────────────────
+// The producer ontology: MCPL RFC-001 §5.
 
 test('the ontology declares the core tags this server emits and no others', () => {
   assert.deepEqual(sorted(GITHUB_TAG_ONTOLOGY.coreTags ?? []), sorted(CORE_TAGS));

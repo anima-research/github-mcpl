@@ -1,20 +1,8 @@
 /**
- * github.review — submitting a review and resolving review threads
- * (TASK-SRHKG.1.6).
- *
- *   create_review     — COMMENT | APPROVE | REQUEST_CHANGES, with inline
- *                       comments on diff lines.
- *   resolve_thread    — mark a review thread resolved.
- *   unresolve_thread  — reopen one.
- *
- * Not rollback-capable: GitHub has no API to withdraw a submitted review, so
- * nothing here can be undone and the declaration says so (ROLLBACK_CAPABLE).
- *
- * The refusal that matters: a clone must not approve or demand changes on its
- * own pull request. A verdict on one's own work is not review, and GitHub's own
- * 422 would arrive too late to be legible, so the author is checked against
- * GITHUB_BOT_LOGIN first and the refusal names the login. A plain COMMENT
- * review on its own pull request is allowed — that is just talking.
+ * GitHub has no API to withdraw a submitted review, so these tools aren't
+ * rollback-capable. GitHub refuses a verdict on one's own pull request with a
+ * 422, so the author is checked against GITHUB_BOT_LOGIN first and the refusal
+ * names the login.
  */
 
 import {
@@ -55,7 +43,7 @@ const DIFF_SIDES: readonly DiffSide[] = ['LEFT', 'RIGHT'];
 /** A verdict on code is only a verdict when someone else wrote it. */
 const VERDICT_EVENTS: readonly ReviewEvent[] = ['APPROVE', 'REQUEST_CHANGES'];
 
-/** GitHub logins are case-insensitive; `rayforce-clone[bot]` is one login. */
+/** GitHub logins are case-insensitive. */
 function sameLogin(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }
@@ -102,11 +90,9 @@ export function parseReviewComments(value: unknown): ReviewCommentInput[] {
 }
 
 /**
- * The review thread id `resolve_thread` takes is the GraphQL node id that
- * `list_review_threads` prints, not the channel-level `rt:<comment id>`. The
- * two name different things (contract notes, "GitHubApi signatures"), so the
- * channel form is refused with the difference spelled out instead of being
- * silently sent to an API that would 404.
+ * `resolve_thread` takes the GraphQL node id `list_review_threads` prints, not
+ * the channel's `rt:<comment id>`, so that form is refused with the
+ * difference named.
  */
 export function requireReviewThreadId(args: Record<string, unknown>): string {
   const threadId = requireString(args, 'threadId');
@@ -121,19 +107,8 @@ export function requireReviewThreadId(args: Record<string, unknown>): string {
 }
 
 /**
- * A review thread this server is allowed to touch, established rather than
- * assumed.
- *
- * A GraphQL node id names a thread without naming its repository, so checking
- * the `repo` argument proves nothing about the node the call then mutates: a
- * node id from any repository the installation can reach would be resolved —
- * and the confirmation would name the allowed repository, which is worse than
- * failing. So the pull request is named too, and the thread has to be one of
- * *its* threads: the repository allow-list is checked on the pull request
- * (`resolveThread`), and membership on the list GitHub returns for it.
- *
- * The cost is one extra read per resolve, which is the price of the id being
- * unforgeable here.
+ * A GraphQL node id names a thread without its repository, so the pull request
+ * is named too and the thread has to be one of its threads.
  */
 async function requireThreadOnPull(
   args: Record<string, unknown>,

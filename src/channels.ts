@@ -95,17 +95,8 @@ export interface ChannelRegistryOptions {
   host: HostConnection;
   logger?: Logger;
   /**
-   * May the registry announce a descriptor *right now*?
-   *
-   * Consulted immediately before each of the two outbound calls that announce
-   * one — `channels/register` and `channels/changed` — rather than once when
-   * the registry is built: the grant is the host's and it can narrow at any
-   * time (§5.4), so a registration decided before a `featureSets/update` must
-   * not go out after it. A denied answer leaves the channel unregistered and
-   * retryable, exactly as a host refusal does.
-   *
-   * Absent means "yes", which is what a test driving the registry on its own
-   * wants; .9 passes `channels.register` from the live grant.
+   * Asked before each announcement rather than once, since MCPL lets the host
+   * narrow the grant at any time.
    */
   canRegister?: () => boolean;
   /**
@@ -127,12 +118,8 @@ export interface ChannelRegistryOptions {
 }
 
 /**
- * `channels/publish` as this server needs it. SPEC 0.5's
- * {@link ChannelsPublishParams} carries no `threadId`, but the contract routes
- * a publish by exactly that (`rt:<id>` → review reply, `review:<id>` and
- * absent → comment), and §14.4 already hands the host a `threadId` on
- * `context/beforeInference`. So the field is optional here and .9 reconciles
- * it with whatever the host actually sends (see the report's contract gaps).
+ * mcpl-core's `ChannelsPublishParams` has no `threadId`, and a publish is
+ * routed by it, so the field is added here as optional.
  */
 export interface GitHubPublishParams extends ChannelsPublishParams {
   threadId?: string;
@@ -142,25 +129,8 @@ export interface GitHubPublishParams extends ChannelsPublishParams {
 export type PublishRoute = 'comment' | 'review-reply' | 'none';
 
 /**
- * What {@link ChannelRegistry.handlePublish} returns — a
- * {@link ChannelsPublishResult} the server can answer the host with, widened
- * with what .7's state has to record to be able to roll the write back:
- *
- *   - `delivered` — whether a comment was created.
- *   - `messageId` — `String(commentId)`, the SPEC's string message id.
- *   - `commentId` — the created comment's numeric GitHub id, the handle
- *     `updateComment`/`deleteComment` (and so rollback) take.
- *   - `htmlUrl` — the created comment's `html_url`.
- *   - `route` — which GitHubApi call was used; `'none'` when nothing was sent.
- *   - `isReviewComment` — true for a review-thread reply, which GitHub edits
- *     and deletes through `pulls/comments/{id}` rather than
- *     `issues/comments/{id}` (the `review` flag of those seam methods).
- *   - `thread` — the issue or PR written to.
- *   - `reason` — why nothing was delivered, when `delivered` is false.
- *
- * A refusal is not reported here: an unknown channel and an attachment both
- * throw {@link McplRpcError} so the server answers a JSON-RPC error object,
- * which §6.6 requires over a result carrying a failure flag.
+ * MCPL wants a refusal as a JSON-RPC error object, not a result carrying a
+ * failure flag, so a refused publish throws instead of returning one of these.
  */
 export interface PublishOutcome extends ChannelsPublishResult {
   delivered: boolean;
@@ -185,11 +155,8 @@ export interface DeliveryOutcome {
 }
 
 /**
- * The metadata of an incoming message: everything `tagsFor` produced, plus the
- * contract's `sender`. mcpl-core's `IncomingChannelMessage.author` is
- * `{ id, name }` and cannot carry `isBot`, so the contract's
- * `sender { login, isBot }` rides in the (open) `metadata` object, where the
- * host's `metadataTrue` matchers can reach it.
+ * mcpl-core's `IncomingChannelMessage.author` is `{ id, name }` and can't carry
+ * `isBot`, so `sender` rides in the open `metadata`.
  */
 export interface IncomingMetadata extends EventMetadata {
   sender: { login: string; isBot: boolean };
@@ -572,22 +539,13 @@ export class ChannelRegistry {
   // ── Publish ──
 
   /**
-   * A host publish onto GitHub, routed by `threadId` exactly as the contract
-   * says:
-   *
-   *   - absent      → `createComment` on the issue or PR;
-   *   - `rt:<id>`   → `replyToReviewComment` in that review conversation;
-   *   - `review:<id>` → `createComment` (a review summary has no reply API).
-   *
-   * Refusals, both as JSON-RPC error objects (§6.6):
-   *   - an unknown or unregistered channel id → `-32023 Unknown channel`;
-   *   - any non-text content block → `-32602 Invalid params`, naming the
-   *     block type. Attachments are not supported in v1.
-   *   - a `threadId` that is neither `rt:<id>` nor `review:<id>`, or an
-   *     `rt:<id>` reply on an issue (review comments live on pull requests
-   *     only) → `-32602 Invalid params`.
-   *
-   * See {@link PublishOutcome} for the return shape.
+   * A publish with no `threadId`, or with `review:<id>`, becomes a comment on
+   * the thread, since GitHub has no reply API for a review summary; `rt:<id>`
+   * becomes a reply in that review conversation. A publish whose text is empty
+   * once trimmed posts nothing and returns `delivered: false`, `route: 'none'`
+   * and `reason: 'empty-content'`. Refused with -32023 for a channel that isn't
+   * registered, and with -32602 for a non-text block, a `threadId` of another
+   * form, or an `rt:` reply on an issue.
    */
   async handlePublish(params: GitHubPublishParams, api: GitHubApi): Promise<PublishOutcome> {
     const record = this.records.get(params.channelId);
@@ -661,10 +619,8 @@ export class ChannelRegistry {
   // ── Typing ──
 
   /**
-   * `channels/typing` — a no-op that answers success. GitHub has no typing
-   * indicator on an issue or a PR, and the alternative (a placeholder comment)
-   * would be a visible write nobody asked for. SPEC §14 fixes no result shape
-   * for the method, so the answer is an empty success object.
+   * GitHub has no typing indicator on an issue or pull request, so
+   * `channels/typing` answers an empty success and does nothing.
    */
   handleTyping(params: ChannelsTypingParams): Record<string, never> {
     this.logger.debug('typing ignored', { channel: params.channelId });

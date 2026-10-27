@@ -587,11 +587,8 @@ test('an issue comment and a review comment sharing an id are two different comm
   const f = fixture();
   f.api.seedIssue({ number: 7 });
   f.api.seedPullRequest({ number: 8 });
-  // GitHub numbers issue comments and review comments from different
-  // sequences, so one id can name both. (FakeGitHubApi's updateComment and
-  // deleteComment ignore the `review` flag when they pick a target — the
-  // assertions below are on the calls the module makes, not on the fake's
-  // choice of victim.)
+  // GitHub numbers issue comments and review comments from separate
+  // sequences, so one id can name both.
   const shared = 500;
   const issueComment = f.api.seedComment(ISSUE, {
     id: shared,
@@ -772,14 +769,8 @@ test('a failed restore retains only the oldest body, and the retry lands on it',
 });
 
 /**
- * A pull request carrying one issue comment and one review comment that share
- * id 500 — two different comments, numbered by two different endpoints.
- *
- * (`FakeGitHubApi.updateComment`/`deleteComment` ignore the `review` flag when
- * they pick a target and always scan the issue comments first, so the
- * assertions below are on the arguments the module passes and on the body it
- * read, not on which of the two the fake then mutated. Fresh fixtures keep
- * that from leaking between cases.)
+ * GitHub numbers issue comments and review comments separately, so a pull
+ * request can carry one of each with the same id.
  */
 function colliding(): { f: Fixture; shared: number } {
   const f = fixture();

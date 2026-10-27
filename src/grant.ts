@@ -1,29 +1,8 @@
 /**
- * Capability grant state (SPEC 0.5 §5.3, §5.4, §6.4, §6.7).
- *
- * The grant is the security boundary. This class holds what the *host* told
- * this connection it may do, and nothing else. The message-to-grant step, the
- * wildcard matching, and the §6.4 derivation all come from @animalabs/mcpl-core
- * (`grantFromUpdate`, `capabilityGranted`, `deriveFeatureSets`); this wrapper
- * adds the connection-lifetime state around them and the degradation receipt.
- *
- * - `effectiveCapabilities` is the sole normative allowlist. Every path not
- *   present is denied; absence is the denial, there is no unspecified state
- *   (§5.4).
- * - `deniedCapabilities` is derived diagnostic data. It is read only to detect
- *   a malformed policy message and never participates in an authorization
- *   decision (§5.4).
- * - Until the initial policy exchange completes, every capability-dependent
- *   behavior is unavailable (§5.3). `has()` therefore returns false before the
- *   first grant-bearing `featureSets/update` Request.
- *
- * Nothing here widens anything. The degradation receipt this produces is
- * testimony about consequences, never an assertion of entitlement (§6.7).
- *
- * Ported from slack-mcpl's src/grant.ts (itself from zulip-mcp), which is
- * protocol-generic. The github adaptation is the `uses` validation of this
- * server's own declarations and {@link CapabilityGrant.toolAllowed}, which
- * gates a `tools/call` on the github feature set that owns the tool.
+ * MCPL SPEC §5.3, §5.4: `effectiveCapabilities` is the only allowlist, and a
+ * path it doesn't name is denied; `deniedCapabilities` is diagnostic and never
+ * authorizes. Nothing is granted before the first grant-bearing
+ * `featureSets/update` Request.
  */
 
 import {
@@ -56,20 +35,12 @@ export class CapabilityGrant {
 
   constructor(private declarations: Record<string, FeatureSetDeclaration> = {}) {}
 
-  /**
-   * Point the grant at the feature-set declarations of a newly installed
-   * manifest (§17.5). Declarations are what degradation is derived from
-   * (§6.4); they are not authority, so this widens nothing — the effective
-   * grant is untouched and stays whatever the host last sent.
-   */
+  /** Declarations aren't authority (MCPL §6.4), so this widens nothing. */
   setDeclarations(declarations: Record<string, FeatureSetDeclaration>): void {
     this.declarations = declarations;
   }
 
-  /**
-   * Forget the grant: a new connection starts from nothing (§5.3) — the
-   * previous peer's policy is not this peer's.
-   */
+  /** A new connection starts with no grant (MCPL §5.3). */
   reset(): void {
     this.state = emptyGrantState();
   }
@@ -131,12 +102,8 @@ export class CapabilityGrant {
   }
 
   /**
-   * Feature sets of this server whose own `uses` is invalid under the closed
-   * §6.2 vocabulary — absent, empty, or naming a path that is not a capability
-   * path. A host disables such a set with reason `invalid_uses` (§6.4), so this
-   * is a declaration bug on our side, not a policy outcome; the startup path
-   * and the degradation receipt both surface it rather than letting the feature
-   * set go quietly missing.
+   * A host disables a feature set whose `uses` is absent, empty or not a
+   * capability path, with reason `invalid_uses` (MCPL §6.2, §6.4).
    */
   invalidDeclarations(): Array<{ featureSet: string; unrecognized: string[] }> {
     return Object.entries(this.declarations)
@@ -146,22 +113,10 @@ export class CapabilityGrant {
   }
 
   /**
-   * Apply a `featureSets/update` and return the degradation receipt (§6.7).
-   *
-   * Throws {@link McplRpcError} when the message is malformed — §5.4 requires
-   * the receiving side to fail closed and reject a policy naming a path in
-   * both `effectiveCapabilities` and `deniedCapabilities`. Fail-closed means
-   * exactly that: the grant that results holds nothing and is not ready, so a
-   * malformed message cannot leave a previous, wider grant standing.
-   *
-   * `form` is how the message arrived. §6.7 requires the **Request** form for
-   * any change to the effective grant and says a Notification "cannot
-   * establish a ready state". A Notification therefore never alters the grant
-   * except to apply `disabled` reductions — reductions are respected whatever
-   * the carrier — and any other grant-bearing field it carries is discarded
-   * with a note, because honouring a widening from an unacknowledgeable
-   * message would have this server acting on a path the host cannot know it
-   * accepted.
+   * MCPL §5.4: a policy naming a path in both `effectiveCapabilities` and
+   * `deniedCapabilities` is malformed, and the grant fails closed: it holds
+   * nothing and isn't ready. §6.7: only a Request can change the effective
+   * grant, so a Notification applies only its `disabled` reductions.
    */
   apply(
     params: FeatureSetsUpdateParams,
@@ -180,8 +135,7 @@ export class CapabilityGrant {
     }
 
     if (form === 'request' && params.effectiveCapabilities === undefined) {
-      // §5.4: effectiveCapabilities is the sole allowlist. Absent means the
-      // empty allowlist, not "unchanged" and not "everything".
+      // MCPL §5.4: an absent `effectiveCapabilities` is the empty allowlist.
       notes.push(
         'No effectiveCapabilities in featureSets/update; treating the grant as empty (SPEC 0.5 §5.4).',
       );

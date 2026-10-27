@@ -27,12 +27,14 @@ import {
 } from '../src/types.js';
 import { FakeGitHubApi, TEST_BOT, TEST_REPO } from './harness.js';
 
+const NO_CHECKPOINT_STORE = undefined as unknown as StateStore;
+
 function ctx(api: FakeGitHubApi, over: Partial<ToolContext> = {}): ToolContext {
   return {
     api,
-    // github.review is not rollback-capable (a submitted review cannot be
-    // withdrawn), so it never touches the checkpoint store.
-    state: undefined as unknown as StateStore,
+    // A submitted GitHub review can't be withdrawn, so github.review keeps no
+    // checkpoints.
+    state: NO_CHECKPOINT_STORE,
     botLogin: TEST_BOT.login,
     repos: [TEST_REPO],
     prBaseAllow: ['dev'],
@@ -261,7 +263,7 @@ test('an inline comment position is validated, never guessed', async () => {
   assert.match(failure(await review([{ path: 'a.rs', line: 0, body: 'x' }])), /\.line" must be a positive integer/);
   assert.match(failure(await review([{ path: 'a.rs', line: -3, body: 'x' }])), /\.line" must be a positive integer/);
   assert.match(failure(await review([{ path: 'a.rs', line: 2.5, body: 'x' }])), /\.line" must be a positive integer/);
-  // A line number as a string is not a line number: GitHub would 422 on it.
+  // GitHub answers a line given as a string with a 422.
   assert.match(failure(await review([{ path: 'a.rs', line: '42', body: 'x' }])), /got "42"/);
   assert.match(
     failure(await review([{ path: 'a.rs', line: 42, side: 'BOTH', body: 'x' }])),
@@ -329,8 +331,8 @@ test('resolve_thread refuses a node id that is not on the pull request', async (
   const api = new FakeGitHubApi();
   api.seedPullRequest({ number: 8, author: HUMAN });
   api.seedReviewThread(PULL, { id: 'RT_ours', isResolved: false });
-  // A thread in a repository the allow-list does not cover. Its node id names
-  // no repository, so the only thing that can refuse it is membership.
+  // A review thread's GraphQL node id names no repository, so only the
+  // allow-list's membership check can refuse a foreign thread.
   const foreignPull: ThreadRef = { repo: OTHER_REPO, number: 8, kind: 'pull' };
   api.seedPullRequest({ repo: OTHER_REPO, number: 8 });
   api.seedReviewThread(foreignPull, { id: 'RT_foreign', isResolved: false });

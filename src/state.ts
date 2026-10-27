@@ -1,35 +1,8 @@
 /**
- * Durable state and rollback bookkeeping (TASK-SRHKG.1.7).
- *
- * The contract's state bullet, and SPEC 0.5 §8:
- *
- *   - a JSON file at GITHUB_STATE_FILE, written atomically (temp file plus
- *     rename), carrying a `version` so a future shape change is detectable;
- *   - checkpoint lineage `{ id, parent, createdAt }`, a tree: rolling back and
- *     writing again branches (§8.2), exactly as slack-mcpl's `StateTracker`
- *     does, with the lineage made durable and the bookkeeping widened from
- *     "messages sent" to "comments created, edited and deleted";
- *   - per checkpoint: the comments this server created, the previous bodies of
- *     the comments it edited, and the comments it deleted;
- *   - `rollback(checkpointId)` computes what has to be undone (delete the
- *     created, restore the edited) and returns null for an unknown checkpoint
- *     so the caller can answer -32005 (§8.7);
- *   - the polling cursors, one per repository and list in `pollCursors` with
- *     `lastPollAt` where a list with none of its own starts, the rows
- *     announced as new while inside their list's window (`pollNew`), the
- *     dedup ring of the last {@link POLL_DEDUP_RING} poll keys (contract
- *     amendment 1), and the last
- *     polled head sha of each open pull request, bounded by
- *     {@link POLL_HEAD_MEMORY} (amendment 2a).
- *
- * **Which checkpoint a write lands under.** A tool records its write under
- * `current()`, and the routing layer creates a checkpoint *after* the call and
- * reports it in `state` (§8.2: the checkpoint names the state *including* that
- * write, which is slack-mcpl's order too). So the bucket keyed by checkpoint C
- * holds the writes that happened while C was current — the writes that came
- * *after* C was created. Rolling back to C therefore undoes C's own bucket and
- * the buckets of every checkpoint descending from C, and leaves everything
- * recorded before C existed ({@link ROOT_BUCKET}) alone.
+ * MCPL checkpoints form a tree: rolling back and then writing again branches,
+ * and a checkpoint names the state including the write reported with it. So a
+ * write is recorded under the checkpoint current when it's made, and a
+ * rollback to C undoes what is recorded under C and its descendants.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -56,9 +29,8 @@ import {
 export const STATE_VERSION = 1;
 
 /**
- * The bucket writes land in before any checkpoint exists. No rollback touches
- * it: a write that preceded every checkpoint is part of the state the oldest
- * checkpoint names, so there is nothing to undo it back to.
+ * Writes made before any checkpoint. The oldest checkpoint's state includes
+ * them, so no rollback undoes them.
  */
 export const ROOT_BUCKET = 'root';
 
@@ -83,9 +55,8 @@ export interface EditedCommentRecord extends EditedComment {
 }
 
 /**
- * A comment this server deleted after a checkpoint. GitHub has no undelete, so
- * rollback can only report it — the body is kept so the receipt can say what
- * was lost without the host having to ask GitHub.
+ * GitHub has no undelete, so rollback can only report a deleted comment; its
+ * body is kept for the receipt.
  */
 export interface DeletedCommentRecord {
   repo: string;
@@ -174,10 +145,9 @@ export class GithubState implements GithubStateStore {
   }
 
   /**
-   * Load the state file, or start empty when it is absent, unreadable, not
-   * JSON, or written by a version this build does not know. A damaged file is
-   * never a startup failure: the bookkeeping is this server's own, and losing
-   * it costs rollback reach, not host data. One stderr line names the file.
+   * A missing state file starts empty. One that can't be read, isn't JSON or
+   * isn't a snapshot this version reads is reported on stderr, and the server
+   * starts empty instead of failing to start.
    */
   static load(file: string | null, logger: Logger = silentLogger()): GithubState {
     if (!file) return GithubState.empty(null, logger);
