@@ -142,6 +142,8 @@ export function describeFailure(toolName: string, err: unknown): string {
   const tool = field(toolName);
   if (err instanceof ToolRefusal) return `${tool} refused: ${err.message}`;
   if (err instanceof ToolArgumentError) return `${tool}: ${err.message}`;
+  const uncertain = uncertainWrite(err);
+  if (uncertain) return `${tool}: ${uncertain}`;
   const message = err instanceof Error ? err.message : String(err);
   const status = statusOf(err);
   return status === undefined
@@ -149,10 +151,27 @@ export function describeFailure(toolName: string, err: unknown): string {
     : `${tool} failed: GitHub error ${status}: ${bounded(message, LIMITS.commentChars)}`;
 }
 
+export function uncertainWrite(err: unknown): string | null {
+  const e = err as {
+    possiblyDone?: unknown;
+    answered?: unknown;
+    status?: unknown;
+    operation?: unknown;
+    githubMessage?: unknown;
+  } | null;
+  if (e?.possiblyDone !== true) return null;
+  const operation = field(String(e.operation));
+  const detail = bounded(String(e.githubMessage), LIMITS.commentChars);
+  const what =
+    e.answered === false
+      ? `no answer came back from GitHub for ${operation} (${detail})`
+      : `GitHub answered ${operation} with ${String(e.status)} (${detail})`;
+  return `${what}, so whether it took effect is unknown. Look on GitHub before trying again: a retry may do it twice.`;
+}
+
 /**
- * Run one tool body. Every refusal, malformed call and GitHub error comes back
- * as an error *result* the model can read (slack-mcpl's convention), never as
- * a thrown protocol error: the call was permitted, it just did not happen.
+ * A refusal, a malformed call or a GitHub error comes back as an error result
+ * the model can read, not as a JSON-RPC error.
  */
 export async function runTool(
   tool: string,
