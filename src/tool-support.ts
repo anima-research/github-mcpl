@@ -28,8 +28,6 @@ import {
   type ToolContext,
   type ToolResult,
 } from './types.js';
-import { GitHubApiError } from './github-adapter.js';
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Bounds
 // ─────────────────────────────────────────────────────────────────────────────
@@ -154,12 +152,20 @@ export function describeFailure(toolName: string, err: unknown): string {
 }
 
 export function uncertainWrite(err: unknown): string | null {
-  if (!(err instanceof GitHubApiError) || !err.possiblyDone) return null;
-  const operation = field(err.operation);
-  const detail = bounded(err.githubMessage, LIMITS.commentChars);
-  const what = err.answered
-    ? `GitHub answered ${operation} with ${err.status} (${detail})`
-    : `no answer came back from GitHub for ${operation} (${detail})`;
+  const e = err as {
+    possiblyDone?: unknown;
+    answered?: unknown;
+    status?: unknown;
+    operation?: unknown;
+    githubMessage?: unknown;
+  } | null;
+  if (e?.possiblyDone !== true) return null;
+  const operation = field(String(e.operation));
+  const detail = bounded(String(e.githubMessage), LIMITS.commentChars);
+  const what =
+    e.answered === false
+      ? `no answer came back from GitHub for ${operation} (${detail})`
+      : `GitHub answered ${operation} with ${String(e.status)} (${detail})`;
   return `${what}, so whether it took effect is unknown. Look on GitHub before trying again: a retry may do it twice.`;
 }
 

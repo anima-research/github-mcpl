@@ -363,7 +363,9 @@ export const commentsToolModule: ToolModule = {
     } catch (err) {
       const uncertain = uncertainWrite(err);
       if (!uncertain) throw err;
-      return refuse(`${field(name)}: ${uncertain} If it did, rollback has no record of it.`);
+      const text = `${field(name)}: ${uncertain} If it did, rollback has no record of it.`;
+      ctx.logger.warn('tool call failed', { tool: field(name), detail: text });
+      return refuse(text);
     }
   },
 };
