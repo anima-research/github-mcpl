@@ -28,6 +28,8 @@ import {
   type ToolContext,
   type ToolResult,
 } from './types.js';
+import { GitHubApiError } from './github-adapter.js';
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Bounds
 // ─────────────────────────────────────────────────────────────────────────────
@@ -142,6 +144,8 @@ export function describeFailure(toolName: string, err: unknown): string {
   const tool = field(toolName);
   if (err instanceof ToolRefusal) return `${tool} refused: ${err.message}`;
   if (err instanceof ToolArgumentError) return `${tool}: ${err.message}`;
+  const uncertain = uncertainWrite(err);
+  if (uncertain) return `${tool}: ${uncertain}`;
   const message = err instanceof Error ? err.message : String(err);
   const status = statusOf(err);
   return status === undefined
@@ -149,10 +153,19 @@ export function describeFailure(toolName: string, err: unknown): string {
     : `${tool} failed: GitHub error ${status}: ${bounded(message, LIMITS.commentChars)}`;
 }
 
+export function uncertainWrite(err: unknown): string | null {
+  if (!(err instanceof GitHubApiError) || !err.possiblyDone) return null;
+  const operation = field(err.operation);
+  const detail = bounded(err.githubMessage, LIMITS.commentChars);
+  const what = err.answered
+    ? `GitHub answered ${operation} with ${err.status} (${detail})`
+    : `no answer came back from GitHub for ${operation} (${detail})`;
+  return `${what}, so whether it took effect is unknown. Look on GitHub before trying again: a retry may do it twice.`;
+}
+
 /**
- * Run one tool body. Every refusal, malformed call and GitHub error comes back
- * as an error *result* the model can read (slack-mcpl's convention), never as
- * a thrown protocol error: the call was permitted, it just did not happen.
+ * A refusal, a malformed call or a GitHub error comes back as an error result
+ * the model can read, not as a JSON-RPC error.
  */
 export async function runTool(
   tool: string,

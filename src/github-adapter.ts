@@ -192,6 +192,8 @@ export class GitHubApiError extends Error {
     githubMessage: string,
     /** The GitHubApi method that failed, e.g. `getIssue`. Never a URL. */
     readonly operation: string,
+    readonly possiblyDone = false,
+    readonly answered = true,
   ) {
     const safe = redactSecrets(githubMessage);
     super(`GitHub ${status} on ${operation}: ${safe}`);
@@ -230,6 +232,8 @@ interface Failure {
   status: number;
   message: string;
   headers: Record<string, string>;
+  read: boolean;
+  answered: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -835,12 +839,15 @@ export class GitHubAdapter implements GitHubApi {
       try {
         return await fn();
       } catch (raw) {
-        // Auth runs inside the transport, so a failure to mint a token or to
-        // find the installation surfaces here wrapped in octokit's generic
-        // "the fetch threw" error. Unwrap it and let the real status and the
-        // real operation out instead of a 500 from `getIssue`.
+        // Auth runs inside the transport, before the request is sent, so a
+        // failure to mint a token or to find the installation surfaces here
+        // wrapped in octokit's generic "the fetch threw" error. Unwrap it and
+        // let the real status and the real operation out instead of a 500
+        // from `getIssue`, as a failure of a request that never went out.
         const authFailure = authFailureIn(raw);
-        if (authFailure) throw authFailure;
+        if (authFailure) {
+          throw new GitHubApiError(authFailure.status, authFailure.githubMessage, authFailure.operation);
+        }
 
         const failure = normalizeFailure(raw);
 
@@ -864,7 +871,13 @@ export class GitHubAdapter implements GitHubApi {
           continue;
         }
 
-        throw new GitHubApiError(failure.status, this.redact(failure.message), operation);
+        throw new GitHubApiError(
+          failure.status,
+          this.redact(failure.message),
+          operation,
+          failure.status >= 500 && !failure.read,
+          failure.answered,
+        );
       }
     }
   }
@@ -1713,8 +1726,9 @@ export function summarizeChecks(
 }
 
 /**
- * Turn whatever octokit threw into a status, GitHub's message and the headers
- * the retry decision needs. Nothing else of the error is kept: octokit's
+ * Turn whatever octokit threw into a status, GitHub's message, the headers
+ * the retry decision needs, whether the request only read, and whether GitHub
+ * answered at all. Nothing else of the error is kept: octokit's
  * `RequestError` carries the request it made, including its headers, and that
  * object must not travel any further than this function.
  */
@@ -1722,10 +1736,13 @@ function normalizeFailure(raw: unknown): Failure {
   const err = raw as {
     status?: number;
     message?: string;
+    request?: { method?: string; url?: string; body?: unknown };
     response?: { headers?: Record<string, unknown>; data?: unknown; status?: number };
     errors?: Array<{ message?: string }>;
   } | null;
 
+  const read = isReadRequest(err?.request?.method, err?.request?.url, err?.request?.body);
+  const answered = err?.response !== undefined;
   const headers: Record<string, string> = {};
   for (const [k, v] of Object.entries(err?.response?.headers ?? {})) {
     if (typeof v === 'string' || typeof v === 'number') headers[k.toLowerCase()] = String(v);
@@ -1735,10 +1752,26 @@ function normalizeFailure(raw: unknown): Failure {
   // a GraphqlResponseError, which has no status of its own.
   if (Array.isArray(err?.errors) && err.errors.length > 0 && err?.status === undefined) {
     const message = err.errors.map((e) => e?.message ?? '').filter(Boolean).join('; ');
-    return { status: err.response?.status ?? 200, message: message || 'GraphQL error', headers };
+    return { status: err.response?.status ?? 200, message: message || 'GraphQL error', headers, read, answered };
   }
 
   const data = err?.response?.data as { message?: string } | undefined;
   const message = data?.message ?? err?.message ?? 'unknown error';
-  return { status: err?.status ?? err?.response?.status ?? 0, message, headers };
+  return { status: err?.status ?? err?.response?.status ?? 0, message, headers, read, answered };
+}
+
+function isReadRequest(method: string | undefined, url: string | undefined, body: unknown): boolean {
+  const verb = method?.toUpperCase();
+  if (verb === 'GET' || verb === 'HEAD') return true;
+  if (verb !== 'POST' || !url?.endsWith('/graphql')) return false;
+  let document = body;
+  if (typeof document === 'string') {
+    try {
+      document = JSON.parse(document);
+    } catch {
+      return false;
+    }
+  }
+  const query = (document as { query?: unknown } | null)?.query;
+  return typeof query === 'string' && /^(?:\s|#[^\n]*)*(?:query\b|\{)/.test(query);
 }
