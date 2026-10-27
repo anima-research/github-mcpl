@@ -150,8 +150,8 @@ export function renderThread(thread: ThreadRef, comments: readonly Comment[]): C
 export function renderReviewThreads(threads: readonly ReviewThread[]): ContentBlock[] {
   if (threads.length === 0) return [textBlock('(no review threads)')];
   const rendered = list(threads, (t) => {
-    // `t.id` is the GraphQL node id `resolve_thread` takes, and
-    // `rt:<root comment id>` is the id `reply_in_thread` takes.
+    // `t.id` is the GraphQL node id `resolve_thread` and `unresolve_thread`
+    // take, and `rt:<root comment id>` is the id `reply_in_thread` takes.
     const state = t.isResolved ? 'resolved' : 'unresolved';
     const head = `${line(t.path, t.line)} (${t.side}) ${state} — thread ${t.id} (reply id rt:${t.comments[0]?.id ?? '?'})`;
     const comments = list(t.comments, (c) =>
