@@ -70,8 +70,8 @@ test('a request whose string holds U+2028 or U+2029 is answered', { timeout: 500
   h.toServer.write(`{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{"cursor":"a\u2029b"}}\n`);
 
   for (const id of [2, 3]) {
-    const answer = (await h.answerTo(id)) as { result?: unknown; error?: unknown };
-    assert.ok(answer.result ?? answer.error, `request ${id} gets a JSON-RPC answer`);
+    const answer = (await h.answerTo(id)) as { result?: unknown };
+    assert.ok(answer.result, `request ${id} is answered with a result`);
   }
 });
 
