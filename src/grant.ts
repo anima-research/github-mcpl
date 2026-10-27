@@ -45,55 +45,32 @@ export class CapabilityGrant {
     this.state = emptyGrantState();
   }
 
-  /** True once a grant-bearing `featureSets/update` Request has been accepted. */
   isReady(): boolean {
     return this.state.ready;
   }
 
-  /**
-   * Is `path` in the effective grant? False before the initial policy
-   * exchange, and false for any path the host did not name.
-   */
   has(path: string): boolean {
     if (!this.state.ready) return false;
     return capabilityGranted(this.state.effectiveCapabilities, path);
   }
 
-  /** Is a declared feature set currently active? */
   isFeatureSetActive(name: string): boolean {
     if (!this.state.ready) return false;
     if (!featureSetSelected(this.state, name)) return false;
     return this.missingFor(name).length === 0;
   }
 
-  /**
-   * Did the host *select* this feature set — i.e. not disable it (§6.7) —
-   * whatever its declared `uses` derive to?
-   *
-   * Selection and activity differ for a set whose surfaces are gated per
-   * capability rather than per set: `github.events` declares `uses:
-   * ['pushEvents']`, so it is inactive under a channels-only grant, and yet a
-   * `channels/incoming` delivery is still granted. The pipeline asks this
-   * first, so a host that turned github.events off gets neither path, and
-   * asks `isFeatureSetActive` for the push it declared.
-   */
   isFeatureSetSelected(name: string): boolean {
     if (!this.state.ready) return false;
     return featureSetSelected(this.state, name);
   }
 
-  /** Capability paths a declared feature set needs but has not been granted. */
   missingFor(name: string): string[] {
     const decl = this.declarations[name];
     if (!decl) return [];
     return decl.uses.filter((use) => !this.has(use));
   }
 
-  /**
-   * May a `tools/call` for `toolName` run? `tools` has to be granted, and the
-   * github feature set that owns the tool has to be active. A tool no feature
-   * set claims is not reachable: absence is the denial (§5.4).
-   */
   toolAllowed(toolName: string): boolean {
     if (!this.has('tools')) return false;
     const featureSet = featureSetForTool(toolName);
@@ -173,7 +150,6 @@ export class CapabilityGrant {
       }),
     );
     for (const [featureSet, why] of Object.entries(derivation.disabled)) {
-      // Not the host's policy: our own declaration is unusable (§6.4).
       if (why.reason === 'invalid_uses') {
         notes.push(
           `Feature set ${featureSet} declares an invalid \`uses\` and is disabled (SPEC 0.5 §6.4)` +

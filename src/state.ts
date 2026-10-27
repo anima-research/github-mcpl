@@ -25,7 +25,6 @@ import {
   type ThreadKind,
 } from './types.js';
 
-/** The `version` field of the on-disk JSON. Bumped when the shape changes. */
 export const STATE_VERSION = 1;
 
 /**
@@ -34,22 +33,15 @@ export const STATE_VERSION = 1;
  */
 export const ROOT_BUCKET = 'root';
 
-/** The thread a recorded comment hangs on, so a receipt can name it. */
 export interface ThreadLocator {
   number: number;
   kind: ThreadKind;
 }
 
-/**
- * {@link CreatedComment} plus the thread it was created on (the contract's
- * "created comment ids (with thread)"). The delete path needs only
- * `repo`/`commentId`/`review`; the thread is what the rollback receipt prints.
- */
 export interface CreatedCommentRecord extends CreatedComment {
   thread?: ThreadLocator;
 }
 
-/** {@link EditedComment} plus its thread, for the same reason. */
 export interface EditedCommentRecord extends EditedComment {
   thread?: ThreadLocator;
 }
@@ -66,26 +58,14 @@ export interface DeletedCommentRecord {
   thread?: ThreadLocator;
 }
 
-/**
- * Re-exported from types.ts, which WP9 made the home of the status so
- * {@link StateStore.checkpointStatus} could be declared on the one state seam.
- */
 export type { CheckpointStatus };
 
-/** {@link RollbackPlan} plus the deletes that cannot be undone at all. */
 export interface CommentRollbackPlan extends RollbackPlan {
   created: CreatedCommentRecord[];
   edited: EditedCommentRecord[];
   deleted: DeletedCommentRecord[];
 }
 
-/**
- * The seam this package installs: {@link StateStore} widened by the two things
- * `types.ts` could not carry — the deletes (which rollback can only report) and
- * the richer plan {@link GithubState.rollback} returns. `ToolContext.state` is
- * typed `StateStore`, so the comment tools narrow to this; .9 installs
- * {@link GithubState} and nothing else implements it.
- */
 export interface GithubStateStore extends StateStore {
   recordCreatedComment(comment: CreatedCommentRecord): void;
   recordEditedComment(comment: EditedCommentRecord): void;
@@ -95,7 +75,6 @@ export interface GithubStateStore extends StateStore {
   snapshot(): GithubStateSnapshot;
 }
 
-/** The on-disk JSON: {@link StateSnapshot} plus `version` and the deletes. */
 export interface GithubStateSnapshot extends StateSnapshot {
   version: number;
   created: Record<string, CreatedCommentRecord[]>;
@@ -119,16 +98,8 @@ export function emptySnapshot(): GithubStateSnapshot {
   };
 }
 
-/**
- * The {@link StateStore} the tools and the poller see, over an in-memory
- * snapshot that {@link GithubState.flush} writes atomically.
- *
- * Without a state file the store still works for the life of the process and
- * `flush()` is a no-op (contract notes: GITHUB_STATE_FILE is optional).
- */
 export class GithubState implements GithubStateStore {
   private snap: GithubStateSnapshot;
-  /** Serializes flushes: two renames must not interleave. */
   private writing: Promise<void> = Promise.resolve();
 
   private constructor(
@@ -139,7 +110,6 @@ export class GithubState implements GithubStateStore {
     this.snap = snap;
   }
 
-  /** A fresh store. `file` null keeps the state in memory only. */
   static empty(file: string | null = null, logger: Logger = silentLogger()): GithubState {
     return new GithubState(file, emptySnapshot(), logger);
   }
@@ -178,8 +148,6 @@ export class GithubState implements GithubStateStore {
     return new GithubState(file, snap, logger);
   }
 
-  // ── Checkpoints (§8.2) ──
-
   createCheckpoint(): CheckpointRecord {
     const record: CheckpointRecord = {
       id: `chk_${randomUUID().slice(0, 8)}`,
@@ -195,12 +163,9 @@ export class GithubState implements GithubStateStore {
     return this.snap.current;
   }
 
-  /** Every checkpoint, in creation order; `parent` carries the tree. */
   lineage(): CheckpointRecord[] {
     return this.snap.checkpoints.map((c) => ({ ...c }));
   }
-
-  // ── Write bookkeeping ──
 
   recordCreatedComment(comment: CreatedCommentRecord): void {
     this.bucket(this.snap.created).push({ ...comment });
@@ -221,11 +186,6 @@ export class GithubState implements GithubStateStore {
     return list;
   }
 
-  // ── Rollback (§8.5) ──
-
-  /**
-   * Is `checkpointId` still rollable? See {@link CheckpointStatus}.
-   */
   checkpointStatus(checkpointId: string): CheckpointStatus {
     if (!this.snap.checkpoints.some((c) => c.id === checkpointId)) return 'unknown';
     const parentOf = new Map(this.snap.checkpoints.map((c) => [c.id, c.parent]));
@@ -235,28 +195,8 @@ export class GithubState implements GithubStateStore {
     return 'abandoned';
   }
 
-  /**
-   * What undoing back to `checkpointId` means, newest action first, and null
-   * when the checkpoint is not `live` — unknown, or abandoned by an earlier
-   * rollback (the caller answers -32005, §8.7).
-   *
-   * Refusing an abandoned checkpoint is the honest answer, not a limitation
-   * worth hiding: once a rollback moved `current` off a branch, that branch's
-   * undo records are spent and this server keeps no redo records, so it cannot
-   * put the comments back the way that checkpoint named them. Accepting it
-   * would report a restoration that did not happen.
-   *
-   * The buckets consumed are the checkpoint's own and every descendant's; they
-   * are cleared and `current` moves to the checkpoint, so the next write
-   * branches from it (§8.2) and a second rollback to the same checkpoint is a
-   * no-op rather than a double undo. An action the caller could not carry out
-   * books itself again (it records under `current`, which is now the
-   * checkpoint), so a retry sees it and cannot claim a completed rollback.
-   */
   rollback(checkpointId: string): CommentRollbackPlan | null {
     if (this.checkpointStatus(checkpointId) !== 'live') return null;
-    // Newest first: creation order reversed, so an edit that followed another
-    // edit of the same comment is restored before the older body overwrites it.
     const ids = this.subtreeIds(checkpointId).reverse();
     const plan: CommentRollbackPlan = { created: [], edited: [], deleted: [] };
     for (const id of ids) {
@@ -271,7 +211,6 @@ export class GithubState implements GithubStateStore {
     return plan;
   }
 
-  /** `checkpointId` and every checkpoint descending from it, creation order. */
   private subtreeIds(checkpointId: string): string[] {
     const parentOf = new Map(this.snap.checkpoints.map((c) => [c.id, c.parent]));
     const inSubtree = (id: string): boolean => {
@@ -282,8 +221,6 @@ export class GithubState implements GithubStateStore {
     };
     return this.snap.checkpoints.filter((c) => inSubtree(c.id)).map((c) => c.id);
   }
-
-  // ── Polling cursor and dedup ring (amendment 1) ──
 
   lastPollAt(): string | null {
     return this.snap.lastPollAt;
@@ -322,14 +259,6 @@ export class GithubState implements GithubStateStore {
     return this.snap.pollHeads[channel] ?? null;
   }
 
-  /**
-   * Record a pull request's head sha, bounded by {@link POLL_HEAD_MEMORY}.
-   *
-   * Insertion order is the eviction order, so re-recording an unchanged head
-   * deletes the key before setting it again: otherwise a long-lived pull
-   * request polled every minute would keep its original (now oldest) slot and
-   * be evicted ahead of heads nobody has looked at since.
-   */
   setPolledHead(channel: string, sha: string): void {
     delete this.snap.pollHeads[channel];
     this.snap.pollHeads[channel] = sha;
@@ -339,19 +268,10 @@ export class GithubState implements GithubStateStore {
     }
   }
 
-  // ── Persistence ──
-
   snapshot(): GithubStateSnapshot {
     return structuredClone(this.snap);
   }
 
-  /**
-   * Write the snapshot atomically: a uniquely named temp file beside the state
-   * file, fsync'd, then renamed over it. A crash before the rename leaves the
-   * previous state file intact and a stray `.tmp-*` beside it, which
-   * {@link GithubState.load} never reads; a crash after it leaves the new
-   * state. No reader ever sees a half-written file.
-   */
   async flush(): Promise<void> {
     const file = this.file;
     if (!file) return;
@@ -368,17 +288,11 @@ export class GithubState implements GithubStateStore {
       }
       await rename(tmp, file);
     });
-    // Keep the chain alive past a failed write, but let the caller see the error.
     this.writing = run.catch(() => undefined);
     await run;
   }
 }
 
-/**
- * Accept a parsed state file only when it is this version and has the shape;
- * missing optional parts are filled in, anything else is rejected (null) so the
- * caller starts empty rather than running on a half-understood file.
- */
 function normalize(parsed: unknown): GithubStateSnapshot | null {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
   const raw = parsed as Partial<GithubStateSnapshot>;
@@ -392,29 +306,18 @@ function normalize(parsed: unknown): GithubStateSnapshot | null {
   snap.created = buckets(raw.created);
   snap.edited = buckets(raw.edited);
   snap.deleted = buckets(raw.deleted);
-  // Only an instant: it is the start of every list with no cursor of its own.
   snap.lastPollAt =
     typeof raw.lastPollAt === 'string' && Number.isFinite(Date.parse(raw.lastPollAt)) ? raw.lastPollAt : null;
-  // Additive like `pollHeads`: a file written before them starts every list
-  // from `lastPollAt`, with no row remembered as announced new.
   snap.pollCursors = cursors(raw.pollCursors);
   snap.pollNew = {};
   if (raw.pollNew && typeof raw.pollNew === 'object' && !Array.isArray(raw.pollNew)) {
     for (const [list, rows] of Object.entries(raw.pollNew)) snap.pollNew[list] = strings(rows);
   }
   snap.pollKeys = Array.isArray(raw.pollKeys) ? raw.pollKeys.filter((k): k is string => typeof k === 'string') : [];
-  // Additive since amendment 2a, so a state file written before it is still a
-  // valid version-1 snapshot: an absent map just means no head is known yet.
   snap.pollHeads = strings(raw.pollHeads);
   return snap;
 }
 
-/**
- * Poll cursors from untrusted JSON. An entry whose `since` isn't an instant is
- * dropped, and its list starts from `lastPollAt`, which is never later than
- * where any list stopped; a `resumeAt` that isn't one is left out, so the
- * list reads from its `since`.
- */
 function cursors(raw: unknown): Record<string, PollCursor> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
   const instant = (value: unknown): value is string => typeof value === 'string' && Number.isFinite(Date.parse(value));
@@ -428,7 +331,6 @@ function cursors(raw: unknown): Record<string, PollCursor> {
   return out;
 }
 
-/** A `Record<string, string>` from untrusted JSON; non-string values dropped. */
 function strings(raw: unknown): Record<string, string> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
   const out: Record<string, string> = {};

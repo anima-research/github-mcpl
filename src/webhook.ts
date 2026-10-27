@@ -28,10 +28,8 @@ import {
   type RepoRef,
 } from './types.js';
 
-/** §Ingress body cap: 1 MiB of raw delivery. */
 export const MAX_BODY_BYTES = 1024 * 1024;
 
-/** §Ingress: "a ring of the last 2000 ids dedups replays". */
 export const DELIVERY_DEDUP_RING = 2000;
 
 const SIGNATURE_HEADER = 'x-hub-signature-256';
@@ -39,34 +37,20 @@ const SIGNATURE_PREFIX = 'sha256=';
 const DELIVERY_HEADER = 'x-github-delivery';
 const EVENT_HEADER = 'x-github-event';
 
-/** What the ingress hands a normalized event to (.9 wires the pipeline). */
 export type EventListener = (event: NormalizedEvent) => void | Promise<void>;
 
 export interface WebhookListenerOptions {
-  /** GITHUB_WEBHOOK_SECRET_FILE's contents. Secret: never logged. */
   secret: string;
-  /** GITHUB_WEBHOOK_PATH; defaults to {@link DEFAULT_WEBHOOK_PATH}. */
   path?: string;
-  /** GITHUB_REPOS. A delivery for anything else is dropped with one line. */
   repos: readonly RepoRef[];
-  /** Where a verified, allowed, fresh event goes. */
   onEvent: EventListener;
-  /** Used to fill `checks.failed` on a `checks.completed` event. */
   api?: Pick<GitHubApi, 'getCheckRuns'>;
-  /**
-   * The "one `checks.completed` per head sha" gate. Pass the poller's own gate
-   * to serialize the two ingress paths against each other; left out, the
-   * listener keeps a private one.
-   */
   checkGate?: CheckGate;
   logger?: Logger;
-  /** Overridable in tests; the stamp on `NormalizedEvent.receivedAt`. */
   now?: () => Date;
-  /** Overridable in tests. Defaults to {@link MAX_BODY_BYTES}. */
   maxBodyBytes?: number;
 }
 
-/** A bounded FIFO set: `add` returns true when the id was already present. */
 class DeliveryRing {
   private readonly seen = new Set<string>();
   private readonly order: string[] = [];
@@ -89,12 +73,6 @@ class DeliveryRing {
   }
 }
 
-/**
- * The listener. `listen()` binds, `close()` unbinds, and `whenIdle()` waits
- * for the post-response processing of every delivery accepted so far — the
- * contract answers 2xx *before* the event is handled, so a test that wants
- * to assert on the handling has to wait for it.
- */
 export class WebhookListener {
   private readonly secret: string;
   private readonly path: string;
@@ -121,7 +99,6 @@ export class WebhookListener {
     this.maxBodyBytes = opts.maxBodyBytes ?? MAX_BODY_BYTES;
   }
 
-  /** Bind and resolve with the port actually bound (0 picks a free one). */
   async listen(port: number, host = '127.0.0.1'): Promise<number> {
     if (this.server) throw new Error('webhook listener is already listening');
     const server = createServer((req, res) => {
@@ -150,23 +127,18 @@ export class WebhookListener {
     await this.whenIdle();
   }
 
-  /** Resolve once every accepted delivery has finished being processed. */
   async whenIdle(): Promise<void> {
     while (this.inFlight.size > 0) {
       await Promise.all([...this.inFlight]);
     }
   }
 
-  /** How many delivery ids the ring currently remembers (tests, diagnostics). */
   get rememberedDeliveries(): number {
     return this.ring.size;
   }
 
-  // ── Request handling ──
-
   private handle(req: IncomingMessage, res: ServerResponse): void {
     if (req.method !== 'POST') {
-      // A browser hitting the path is noise, not a delivery.
       respond(res, 405, 'method not allowed');
       req.resume();
       return;
@@ -222,9 +194,7 @@ export class WebhookListener {
     });
   }
 
-  /** Steps 3 to 6. `body` is the raw bytes; it is not parsed before step 6. */
   private afterBody(req: IncomingMessage, res: ServerResponse, body: Buffer): void {
-    // 3. Signature over the raw bytes, before anything interprets them.
     if (!this.signatureValid(header(req, SIGNATURE_HEADER), body)) {
       this.logger.warn('webhook delivery rejected: X-Hub-Signature-256 did not verify', {
         delivery: header(req, DELIVERY_HEADER) ?? '(none)',
@@ -241,7 +211,6 @@ export class WebhookListener {
       return;
     }
 
-    // 4. Replay. Only verified deliveries may write to the ring.
     if (this.ring.add(delivery)) {
       this.logger.info('webhook delivery dropped: replay of a delivery id already seen', { delivery, event });
       respond(res, 200, 'duplicate delivery');
@@ -256,7 +225,6 @@ export class WebhookListener {
       return;
     }
 
-    // 6. 2xx first, then the work.
     respond(res, 202, 'accepted');
     const receivedAt = this.now().toISOString();
     const task = this.process({ id: delivery, event, body, receivedAt }).catch((err: unknown) => {
@@ -314,8 +282,6 @@ export class WebhookListener {
       return;
     }
 
-    // One stderr line per dropped delivery, naming the repository the
-    // allow-list does not hold (§Ingress).
     const repo = events[0].repo;
     if (!repoAllowed(repo, this.repos)) {
       this.logger.warn('webhook delivery dropped: repository outside GITHUB_REPOS', {
@@ -326,8 +292,6 @@ export class WebhookListener {
       return;
     }
 
-    // The lookup also decides readiness: a sha with a suite still running is
-    // held back here, so the one emission it gets names every failed job.
     const resolved = this.api ? await resolveCheckEvents(events, this.api, this.logger) : events;
 
     for (const normalized of resolved) {
@@ -336,11 +300,6 @@ export class WebhookListener {
         await this.onEvent(normalized);
         continue;
       }
-      // §Ingress wants one checks event per head sha, and two suites on one
-      // commit are two deliveries the delivery-id ring cannot collapse. The
-      // gate serializes this emission against every other one for the same
-      // sha — including a poll pass running right now — and drops it if what
-      // the listener already accepted covers it.
       const delivered = await this.checkGate.emit(normalized.repo, normalized.sha as string, mark, async () => {
         await this.onEvent(normalized);
       });
@@ -360,18 +319,12 @@ function header(req: IncomingMessage, name: string): string | undefined {
   return typeof value === 'string' ? value : Array.isArray(value) ? value[0] : undefined;
 }
 
-/** Responses are plain text and never echo a header, a body or the secret. */
 function respond(res: ServerResponse, status: number, message: string): void {
   if (res.writableEnded) return;
   res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' });
   res.end(`${message}\n`);
 }
 
-/**
- * The listener a validated {@link Config} describes, or `null` when
- * GITHUB_WEBHOOK_PORT is absent ("webhook listener off"). `readConfig`
- * already guarantees a secret whenever the port is set.
- */
 export function webhookListenerFromConfig(
   config: Config,
   deps: Pick<WebhookListenerOptions, 'onEvent' | 'api' | 'logger' | 'checkGate'>,

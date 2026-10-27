@@ -19,7 +19,6 @@ const packageDir = fileURLToPath(new URL('..', import.meta.url));
 const recipe = (name: string): any =>
   JSON.parse(readFileSync(join(packageDir, 'examples', name), 'utf8'));
 
-/** The host's event shape, as much of it as a wake policy can match on. */
 interface GateEventInfo {
   content: string;
   eventType: string;
@@ -41,12 +40,6 @@ interface GateModule {
   formatShadowWarning(warning: unknown): string;
 }
 
-/**
- * Where a sibling agent-framework checkout can be: beside this package in a
- * `repos/` tree, or — when this package is a linked git worktree, whose
- * parent directory holds nothing else — beside the checkout its `.git` file
- * points at.
- */
 function gateModuleCandidates(): string[] {
   const seeds = [packageDir];
   const dotGit = join(packageDir, '.git');
@@ -84,7 +77,6 @@ async function loadGate(): Promise<GateModule> {
   return (await import(gatePath as string)) as GateModule;
 }
 
-/** An EventGate over one recipe's wake config, with every host callback inert. */
 async function gateFor(recipeName: string): Promise<{ probe(info: GateEventInfo): GateDecision }> {
   const { EventGate } = await loadGate();
   return new EventGate({
@@ -102,15 +94,12 @@ const skipReason =
   `no agent-framework beside this checkout (${candidates.length} paths tried); ` +
   'set GITHUB_MCPL_GATE_MODULE to the gate module to run these';
 
-// ─── the events, as tags.ts (.4) will produce them ──────────────────────────
-
 const base = {
   eventType: 'mcpl:push-event',
   serverId: 'github',
   channelId: 'github:owner/repo#12',
 };
 
-/** A green build on the agent's own pull request. */
 const ownThreadCiSuccess: GateEventInfo = {
   ...base,
   content: 'All checks have passed',
@@ -118,7 +107,6 @@ const ownThreadCiSuccess: GateEventInfo = {
   metadata: { isOwnThread: true, isCiFailure: false, fromSelf: false, repo: 'owner/repo', number: 12 },
 };
 
-/** The same pull request, build broken. */
 const ownThreadCiFailure: GateEventInfo = {
   ...base,
   content: 'build-and-test failed',
@@ -126,7 +114,6 @@ const ownThreadCiFailure: GateEventInfo = {
   metadata: { isOwnThread: true, isCiFailure: true, fromSelf: false, repo: 'owner/repo', number: 12 },
 };
 
-/** Dependabot opens a pull request nobody asked the agent about. */
 const botOpenedPull: GateEventInfo = {
   ...base,
   channelId: 'github:owner/repo#13',
@@ -135,7 +122,6 @@ const botOpenedPull: GateEventInfo = {
   metadata: { isOwnThread: false, mentioned: false, fromSelf: false, repo: 'owner/repo', number: 13 },
 };
 
-/** A human opens a pull request. */
 const humanOpenedPull: GateEventInfo = {
   ...base,
   channelId: 'github:owner/repo#14',
@@ -144,7 +130,6 @@ const humanOpenedPull: GateEventInfo = {
   metadata: { isOwnThread: false, mentioned: false, isMaintainer: true, repo: 'owner/repo', number: 14 },
 };
 
-/** A human says the agent's name. */
 const humanMention: GateEventInfo = {
   ...base,
   eventType: 'mcpl:channel-incoming',
@@ -153,7 +138,6 @@ const humanMention: GateEventInfo = {
   metadata: { mentioned: true, isOwnThread: false, fromSelf: false, repo: 'owner/repo', number: 12 },
 };
 
-/** The agent's own comment coming back round. */
 const ownComment: GateEventInfo = {
   ...base,
   eventType: 'mcpl:channel-incoming',
@@ -162,7 +146,6 @@ const ownComment: GateEventInfo = {
   metadata: { fromSelf: true, isOwnThread: true, repo: 'owner/repo', number: 12 },
 };
 
-/** A push to a branch, no thread attached. */
 const push: GateEventInfo = {
   ...base,
   channelId: 'github:owner/repo#0',
@@ -170,8 +153,6 @@ const push: GateEventInfo = {
   tags: ['github:push', 'chat:from-human', 'chat:ambient'],
   metadata: { isOwnThread: false, fromSelf: false, repo: 'owner/repo' },
 };
-
-// ─── what both recipes must do ───────────────────────────────────────────────
 
 for (const name of ['recipe-maintainer-clone.json', 'recipe-contributor.json']) {
   test(`${name}: a green build on the agent's own thread does not wake it`, { skip: gatePath ? false : skipReason }, async () => {
@@ -217,8 +198,6 @@ for (const name of ['recipe-maintainer-clone.json', 'recipe-contributor.json']) 
     assert.deepEqual(warnings.map(formatShadowWarning), [], 'first match wins: an earlier rule eats a later one');
   });
 }
-
-// ─── where they differ ───────────────────────────────────────────────────────
 
 test('recipe-maintainer-clone.json: a human opening a pull request debounces, it does not wake at once', { skip: gatePath ? false : skipReason }, async () => {
   const d = (await gateFor('recipe-maintainer-clone.json')).probe(humanOpenedPull);

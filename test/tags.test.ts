@@ -1,12 +1,3 @@
-/**
- * tags.ts — table-driven over every `NormalizedEventKind`, plus the detection
- * rules (mention, self, maintainer), the closure invariants and the bounds.
- *
- * The table is the point: the coverage test below fails the moment a kind is
- * added to the contract without a row here, so "every kind has a tags row" is
- * a test rather than a promise.
- */
-
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import {
@@ -33,7 +24,6 @@ const BOT = 'rayforce-clone[bot]';
 const ISSUE: ThreadRef = { repo: REPO, number: 7, kind: 'issue' };
 const PULL: ThreadRef = { repo: REPO, number: 12, kind: 'pull' };
 
-/** A deployment with no maintainers and no thread history, unless overridden. */
 function ctx(over: Partial<GitHubTagContext> = {}): GitHubTagContext {
   return { botLogin: BOT, maintainers: [], ...over };
 }
@@ -56,16 +46,10 @@ function sorted(tags: readonly string[]): string[] {
   return [...tags].sort();
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// The table: one row per NormalizedEventKind
-// ─────────────────────────────────────────────────────────────────────────────
-
 interface Row {
   kind: NormalizedEventKind;
-  /** What the kind carries beyond the baseline event. */
   event?: Partial<NormalizedEvent>;
   ctx?: Partial<GitHubTagContext>;
-  /** The exact tag set, for a human author with no thread history. */
   tags: string[];
 }
 
@@ -215,10 +199,6 @@ test('tags are deduplicated and namespaced', () => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Closure rules
-// ─────────────────────────────────────────────────────────────────────────────
-
 const NEW_TEXT_KINDS: readonly string[] = [
   'issue.opened',
   'issue.edited',
@@ -231,8 +211,6 @@ const NEW_TEXT_KINDS: readonly string[] = [
 ];
 
 test('a close, reopen, push or new commits never count the mention in a body they re-carry', () => {
-  // The 2026-10-15 rehearsal: a polled issue.closed re-carried the issue's
-  // body, and its old mention woke the bot that had just closed it.
   for (const kind of NORMALIZED_EVENT_KINDS) {
     const { tags, metadata } = tagsFor(event(kind, { body: '@rayforce-clone please look' }), ctx());
     const counts = NEW_TEXT_KINDS.includes(kind);
@@ -250,14 +228,12 @@ test('chat:ambient never co-occurs with chat:mention or chat:reply, on any kind'
   ];
   for (const kind of NORMALIZED_EVENT_KINDS) {
     for (const [label, ctxOver, eventOver] of addressing) {
-      // A mention alone addresses only the kinds that bring their text.
       if (label === 'mention' && !NEW_TEXT_KINDS.includes(kind)) continue;
       const { tags } = tagsFor(event(kind, eventOver), ctx(ctxOver));
       const addressed = tags.includes('chat:mention') || tags.includes('chat:reply');
       assert.ok(addressed, `${kind} / ${label}: expected an addressed tag`);
       assert.ok(!tags.includes('chat:ambient'), `${kind} / ${label}: ambient beside addressed`);
     }
-    // And the converse: unaddressed traffic is ambient and nothing else.
     const { tags } = tagsFor(event(kind), ctx());
     assert.ok(tags.includes('chat:ambient'), `${kind}: expected chat:ambient`);
     assert.ok(!tags.includes('chat:mention') && !tags.includes('chat:reply'));
@@ -291,10 +267,6 @@ test('exactly one sender tag, and from-self only for the bot login', () => {
     assert.equal(metadata.fromSelf, expected === 'chat:from-self');
   }
 });
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Mention detection
-// ─────────────────────────────────────────────────────────────────────────────
 
 test('mentionsBot accepts both spellings of an App login and rejects near misses', () => {
   const yes = [
@@ -331,10 +303,6 @@ test('hasLink finds http(s) URLs only', () => {
   assert.ok(!hasLink(undefined));
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// github: tags that need more than the kind
-// ─────────────────────────────────────────────────────────────────────────────
-
 test('a merged pull request carries both closed and merged', () => {
   const closed = tagsFor(event('pull.closed'), ctx()).tags;
   assert.ok(closed.includes('github:pr=closed'));
@@ -357,9 +325,7 @@ test('ci tags and isCiFailure follow the conclusion, not the kind', () => {
     [{ conclusion: 'failure', failed: [{ name: 'test', url: 'u' }] }, 'github:ci=failure', true],
     [{ conclusion: 'timed_out', failed: [] }, 'github:ci=failure', true],
     [{ conclusion: 'action_required', failed: [] }, 'github:ci=failure', true],
-    // A green roll-up with a failed job in the list is still a failure.
     [{ conclusion: 'success', failed: [{ name: 'flaky', url: 'u' }] }, 'github:ci=failure', true],
-    // Neither a pass nor a failure: no ci tag at all.
     [{ conclusion: 'neutral', failed: [] }, null, false],
     [{ conclusion: 'cancelled', failed: [] }, null, false],
     [{ conclusion: 'skipped', failed: [] }, null, false],
@@ -396,10 +362,6 @@ test('isReviewRequested is set for pull.review_requested and suppressible', () =
     assert.equal(tagsFor(event(kind), ctx()).metadata.isReviewRequested, false, kind);
   }
 });
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Metadata
-// ─────────────────────────────────────────────────────────────────────────────
 
 test('metadata carries the scalar fields of the thread, actor and event', () => {
   const { metadata } = tagsFor(
@@ -509,7 +471,6 @@ test('no suggested treatment promotes unaddressed traffic', () => {
     if (matched.includes('chat:ambient') || matched.includes('chat:from-bot')) {
       assert.notEqual(rule.behavior, 'immediate', JSON.stringify(rule));
     }
-    // An `immediate` suggestion is only ever reached by addressed traffic.
     if (rule.behavior === 'immediate') {
       assert.ok(
         (rule.tagsAll ?? []).some((t) => t === 'chat:mention' || t === 'chat:reply'),

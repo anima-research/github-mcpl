@@ -1,17 +1,3 @@
-/**
- * Ingress normalization (TASK-SRHKG.1.3, §Ingress).
- *
- * One place turns a GitHub delivery into a {@link NormalizedEvent}: a raw
- * webhook payload (webhook.ts) or a polled row (poller.ts). Everything here
- * is pure and total — a payload is untrusted input, so a field that is
- * missing or of the wrong type makes the event drop rather than throw — with
- * one exception at the bottom, {@link resolveCheckEvents}, which is the async
- * check-run lookup the contract puts on a `checks.completed` event.
- *
- * `raw` is kept on every event (the contract's field) and is never read by
- * anything downstream: tags.ts and content.ts see only the named fields.
- */
-
 import { createHash } from 'node:crypto';
 import {
   parseRepoSlug,
@@ -32,42 +18,22 @@ import {
   type ThreadRef,
 } from './types.js';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Deliveries and poll rows (types the contract implies; see the .3 report)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * One verified webhook delivery. `id` is `X-GitHub-Delivery` (the event id the
- * contract names), `event` is `X-GitHub-Event`, `payload` is the parsed JSON —
- * parsed only after webhook.ts has checked the signature.
- */
 export interface WebhookDelivery {
   id: string;
   event: string;
   payload: unknown;
-  /** ISO-8601; webhook.ts stamps it when the body finished arriving. */
   receivedAt: string;
 }
 
-/**
- * Which `since` query a poll row came from. Part of the dedup key and of the
- * poll event id (`poll:<kind>:<id>:<updated_at>`, contract amendment 1).
- */
 export type PollRowKind = 'issue' | 'issue_comment' | 'review_comment' | 'checks';
 
-/** `<kind>:<id>:<updated_at>` — what `StateStore.seenPollKey` remembers. */
 export function pollKey(kind: PollRowKind, id: number | string, updatedAt: string): string {
   return `${kind}:${id}:${updatedAt}`;
 }
 
-/** `poll:<kind>:<id>:<updated_at>` — the `NormalizedEvent.id` of a polled event. */
 export function pollEventId(key: string): string {
   return `poll:${key}`;
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Untrusted-JSON accessors
-// ─────────────────────────────────────────────────────────────────────────────
 
 type Json = Record<string, unknown>;
 
@@ -97,11 +63,6 @@ function at(value: unknown, ...path: string[]): unknown {
   return cursor;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Shared field extraction
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** `login` ending in `[bot]`, or GitHub's own `type: 'Bot'`. */
 export function actorFrom(user: unknown): EventActor | undefined {
   const login = asString(at(user, 'login'));
   if (!login) return undefined;
@@ -109,7 +70,6 @@ export function actorFrom(user: unknown): EventActor | undefined {
   return { login, isBot: type === 'Bot' || login.endsWith('[bot]') };
 }
 
-/** The repository a delivery is about, from `repository.full_name`. */
 export function repoFrom(payload: unknown): RepoRef | undefined {
   const full = asString(at(payload, 'repository', 'full_name'));
   if (full) {
@@ -144,8 +104,6 @@ function reviewStateFrom(value: unknown): ReviewState {
     case 'changes_requested':
       return 'changes_requested';
     default:
-      // `commented`, and `dismissed`/anything else a future action adds: a
-      // review that is neither an approval nor a block is a comment.
       return 'commented';
   }
 }
@@ -166,14 +124,9 @@ function thread(repo: RepoRef, number: number | undefined, kind: ThreadKind): Th
   return number === undefined ? undefined : { repo, number, kind };
 }
 
-/** A delivery that fans out gets `<delivery id>#<n>`; a single event keeps the id. */
 function eventId(deliveryId: string, index: number, total: number): string {
   return total > 1 ? `${deliveryId}#${index}` : deliveryId;
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Webhook payloads
-// ─────────────────────────────────────────────────────────────────────────────
 
 const ISSUE_ACTIONS: Record<string, NormalizedEventKind> = {
   opened: 'issue.opened',
@@ -199,12 +152,9 @@ const PULL_ACTIONS: Record<string, NormalizedEventKind> = {
 const REVIEW_COMMENT_ACTIONS: Record<string, NormalizedEventKind> = {
   created: 'review_comment.created',
   edited: 'review_comment.edited',
-  // The contract names no `review_comment.deleted`; a deleted review comment
-  // is a deleted comment that happens to carry `reviewComment`.
   deleted: 'comment.deleted',
 };
 
-/** The webhook event names this ingress maps. Anything else is dropped. */
 export const HANDLED_WEBHOOK_EVENTS: readonly string[] = [
   'issues',
   'issue_comment',
@@ -216,15 +166,6 @@ export const HANDLED_WEBHOOK_EVENTS: readonly string[] = [
   'push',
 ];
 
-/**
- * A verified delivery, normalized. Returns `[]` for an event or an action the
- * contract names no kind for (`issues.labeled`, `pull_request.reopened`,
- * `ping`, `installation`, …) and for a payload too malformed to place —
- * dropping is the only safe answer, and webhook.ts logs the drop.
- *
- * Only `check_suite`/`check_run` can return more than one event, one per head
- * sha (§Ingress); the ids are then `<delivery>#<n>`.
- */
 export function normalizeWebhook(delivery: WebhookDelivery): NormalizedEvent[] {
   const { payload } = delivery;
   const repo = repoFrom(payload);
@@ -373,13 +314,6 @@ export function normalizeWebhook(delivery: WebhookDelivery): NormalizedEvent[] {
 
 type EventBase = Pick<NormalizedEvent, 'id' | 'receivedAt' | 'repo' | 'raw'>;
 
-/**
- * §Ingress: "one `checks.completed` event per head sha". A suite has one head
- * sha; the thread is the first pull request in `pull_requests` whose head is
- * that sha, so a suite on a branch with no PR still produces one (thread-less)
- * event. `failed` is filled from the payload's own check runs if it carries
- * any and otherwise by {@link resolveCheckEvents}.
- */
 function normalizeCheckSuite(base: EventBase, payload: unknown, actor: EventActor | undefined): NormalizedEvent[] {
   const suite = asObject(at(payload, 'check_suite'));
   if (!suite) return [];
@@ -397,8 +331,6 @@ function normalizeCheckSuite(base: EventBase, payload: unknown, actor: EventActo
       ...base,
       kind: 'checks.completed',
       thread: thread(base.repo, number, 'pull'),
-      // A check suite's `sender` is the App that produced it; the suite has no
-      // human actor, so an absent sender falls back to the App's slug.
       actor: actor ?? { login: asString(at(suite, 'app', 'slug')) ?? 'github', isBot: true },
       html_url,
       sha,
@@ -438,10 +370,6 @@ function normalizeCheckRun(base: EventBase, payload: unknown, actor: EventActor 
     },
   ];
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Poll rows (contract amendments 1 and 2a)
-// ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * GitHub stamps a row without milliseconds while a cursor carries them, and
@@ -498,24 +426,12 @@ export function normalizePolledIssue(
   };
 }
 
-/**
- * What the poller records per thread to tell a real change from a comment's
- * bump: an open pull request's head sha (undefined when the adapter did not
- * fetch it, which records nothing), `closed` for a closed pull request, and
- * for an issue its state with a hash of its title and body.
- */
 export function polledMarker(row: PolledIssue): string | undefined {
   if (row.isPullRequest) return row.state === 'closed' ? 'closed' : row.headSha || undefined;
   const text = createHash('sha256').update(`${row.title}\0${row.body}`).digest('hex').slice(0, 16);
   return `issue:${row.state}:${text}`;
 }
 
-/**
- * An issue comment or a review comment from `listIssueCommentsSince` /
- * `listReviewCommentsSince`. Same caveat as above: a poll cannot tell a new
- * comment from an edited one, so both arrive as `*.created` with
- * `updated_at` in the id.
- */
 export function normalizePolledComment(
   repo: RepoRef,
   row: PolledComment,
@@ -539,8 +455,6 @@ export function normalizePolledComment(
           reviewComment: {
             id: row.id,
             path: row.path ?? '',
-            // A `since` comment row carries no line, side or diff hunk; the
-            // thread read (`listReviewThreads`) is where those live.
             line: null,
             side: 'RIGHT' as DiffSide,
             diffHunk: '',
@@ -552,72 +466,18 @@ export function normalizePolledComment(
   };
 }
 
-/**
- * The check lifecycle, in one place.
- *
- * A head sha can report its checks many times over — two workflows are two
- * `check_suite.completed` deliveries, a deployment subscribed to `check_run`
- * gets one per job, a poll pass sees whatever `getCheckRuns` says at that
- * moment, and the webhook and the poller can be doing all of that at once —
- * while §Ingress asks for one `checks.completed` per head sha. Four rules,
- * and the thing that makes them hold under concurrency is the third:
- *
- *   1. **A head enters the lifecycle** when a pull-request row or a check
- *      webhook names it.
- *   2. **It leaves when its checks are settled and the event was accepted.**
- *      Settled means every run on the sha has finished
- *      ({@link isCompletedSummary}); a sha with a suite still running is held
- *      back by {@link resolveCheckEvents} rather than reported with a
- *      provisional conclusion. Accepted means the listener took it without
- *      throwing — the poller keeps the head in its backlog until then.
- *   3. **Every emission for one head sha is serialized.** {@link CheckGate}
- *      runs them one after another through a per-sha promise chain, whichever
- *      ingress path they came from. So an emission never has to reason about
- *      another one being in flight: by the time it runs, every earlier
- *      emission for its sha has already either committed a mark or failed.
- *   4. **A mark is committed only after the listener accepted the event**, and
- *      an emission the committed mark already {@link coversMark covers} is
- *      dropped. A refused or thrown delivery commits nothing and leaves no
- *      trace, so the next emission for that sha — the retry, or the other
- *      path — still gets to deliver it.
- *
- * There is deliberately no reservation, no provisional entry and no rollback:
- * the only writes are commits, and a commit means "the listener has this".
- * Two earlier designs tried to make a claim-then-release state machine safe
- * and each left a window where a refusal erased a newer accepted result or a
- * pending claim hid work from the poller.
- */
-
-/** A {@link ChecksSummary} whose runs have all finished. */
 export type CompletedChecksSummary = ChecksSummary & { conclusion: CheckConclusion };
 
-/** Have the runs on this sha finished, so that `checks.completed` is true? */
 export function isCompletedSummary(summary: ChecksSummary): summary is CompletedChecksSummary {
   return summary.total > 0 && summary.conclusion !== null;
 }
 
-/**
- * The dedup key of a polled check result:
- * `checks:<sha>:<conclusion>:<n>:<fingerprint of the failed job names>`.
- *
- * A check result has no `updated_at` to key on, so the third field is what
- * makes the result distinct news instead — its conclusion and *which* jobs
- * failed. A sha can legitimately settle twice: a suite created after the first
- * poll adds its own failures, or replaces them with others of the same count
- * (review round 4), and neither may look like a duplicate of the earlier
- * result. The names are hashed so the key stays bounded.
- */
 export function checksPollKey(summary: CompletedChecksSummary): string {
   const names = summary.failed.map((f) => f.name).sort();
   const fingerprint = createHash('sha1').update(names.join('\n')).digest('hex').slice(0, 12);
   return pollKey('checks', summary.sha, `${summary.conclusion}:${summary.failed.length}:${fingerprint}`);
 }
 
-/**
- * The check state of a polled pull-request head. The summary has to be
- * *completed*: a head whose runs are still going belongs in the poller's
- * backlog, not in a `checks.completed` event (rule 2).
- */
 export function normalizePolledChecks(
   repo: RepoRef,
   pull: ThreadRef,
@@ -670,7 +530,6 @@ export async function resolveCheckEvents(
     if (isCompletedSummary(summary)) {
       out.push({ ...event, checks: { conclusion: summary.conclusion, failed: summary.failed } });
     } else if (summary.total === 0) {
-      // The API knows of no runs on this sha, so the payload is all there is.
       out.push(event);
     } else {
       logger?.info('checks event held back: another suite is still running on this head', {
@@ -682,17 +541,8 @@ export async function resolveCheckEvents(
   return out;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// One checks.completed per head sha: serialize, then commit
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** How many head shas the committed-mark ring remembers. */
 export const CHECK_MARK_RING = 2000;
 
-/**
- * How bad a conclusion is, ascending. `null` (nothing settled yet) ranks
- * below every real conclusion, so the first real one always gets through.
- */
 const CONCLUSION_SEVERITY: Record<CheckConclusion, number> = {
   success: 0,
   skipped: 1,
@@ -708,43 +558,21 @@ function severity(conclusion: CheckConclusion | null): number {
   return conclusion === null ? -1 : CONCLUSION_SEVERITY[conclusion];
 }
 
-/**
- * What a head sha has already told the listener — the *committed* record, only
- * ever written after an accepted delivery.
- *
- * It accumulates rather than replaces: `rank` is the worst conclusion seen and
- * `failed` the union of the job names reported. That is what makes an older
- * result unable to undo a newer one, and it bounds how often one sha can be
- * emitted (once per severity level, plus once per job name that appears).
- */
 export interface CheckMark {
-  /** {@link CONCLUSION_SEVERITY} of the conclusion; `-1` for none yet. */
   rank: number;
-  /** Failed job names, sorted and deduplicated. */
   failed: readonly string[];
 }
 
-/** The mark of a `checks.completed` event, or null for any other event. */
 export function checkMarkOf(event: NormalizedEvent): CheckMark | null {
   if (event.kind !== 'checks.completed' || !event.sha) return null;
   const names = [...new Set((event.checks?.failed ?? []).map((f) => f.name))].sort();
   return { rank: severity(event.checks?.conclusion ?? null), failed: names };
 }
 
-/**
- * Does what the listener already has say everything `mark` would say?
- *
- * True when the committed conclusion is at least as bad and names at least the
- * same failed jobs — then `mark` is a duplicate, a weaker re-run, or a shorter
- * view of the same failures, and emitting it would only repeat the sha. False
- * when `mark` is a stronger conclusion or names a job the listener has not
- * heard about, which is the case that must supersede.
- */
 export function coversMark(committed: CheckMark, mark: CheckMark): boolean {
   return committed.rank >= mark.rank && mark.failed.every((name) => committed.failed.includes(name));
 }
 
-/** The worst conclusion and every failed job name either mark knows. */
 function mergeMarks(a: CheckMark, b: CheckMark): CheckMark {
   return {
     rank: Math.max(a.rank, b.rank),
@@ -752,52 +580,24 @@ function mergeMarks(a: CheckMark, b: CheckMark): CheckMark {
   };
 }
 
-/**
- * The gate that makes "one `checks.completed` per head sha" true across every
- * ingress path, keyed on `<owner>/<name>@<sha>`.
- *
- * Two pieces, and neither of them is a state machine:
- *
- *   - **a per-sha promise chain**, so all emissions for one head sha run one
- *     after another. A webhook delivery and a poll pass for the same sha do
- *     not race; the second one simply waits its turn.
- *   - **a bounded ring of committed marks**, written only after a delivery was
- *     accepted. Nothing is ever written speculatively, so there is nothing to
- *     release and no window in which a refusal can erase what another
- *     emission already got accepted.
- */
 export class CheckGate {
   private readonly committed = new Map<string, CheckMark>();
-  /** The tail of each head sha's queue. Absent once the queue has drained. */
   private readonly queues = new Map<string, Promise<unknown>>();
 
   constructor(private readonly capacity: number = CHECK_MARK_RING) {}
 
-  /** `<owner>/<name>@<sha>`. */
   static key(repo: RepoRef, sha: string): string {
     return `${repo.owner}/${repo.name}@${sha}`;
   }
 
-  /** What the listener has already accepted for this head sha, if anything. */
   committedMark(repo: RepoRef, sha: string): CheckMark | undefined {
     return this.committed.get(CheckGate.key(repo, sha));
   }
 
-  /**
-   * Deliver one checks event for this head sha, in turn.
-   *
-   * Waits for every emission already queued for the sha, then compares `mark`
-   * against what those emissions committed. Returns false without calling
-   * `deliver` when the committed mark already covers it. Otherwise calls
-   * `deliver`, commits `mark` once it resolves, and returns true — or lets its
-   * rejection through untouched, having committed nothing.
-   */
   async emit(repo: RepoRef, sha: string, mark: CheckMark, deliver: () => Promise<void>): Promise<boolean> {
     const key = CheckGate.key(repo, sha);
 
     const run = async (): Promise<boolean> => {
-      // Read inside the chain: every earlier emission for this sha has
-      // settled by now, so this sees their commits and none of their attempts.
       const seen = this.committed.get(key);
       if (seen !== undefined && coversMark(seen, mark)) return false;
       await deliver();
@@ -806,27 +606,17 @@ export class CheckGate {
     };
 
     const ahead = this.queues.get(key);
-    // `then(run, run)` on both outcomes: an emission that was refused must not
-    // stall the queue behind it — that refusal is exactly when the next one
-    // needs to run.
     const mine: Promise<boolean> = ahead === undefined ? run() : ahead.then(run, run);
     this.queues.set(key, mine);
     try {
       return await mine;
     } finally {
-      // Drop the queue when nothing is waiting behind this emission, so a
-      // quiet sha costs nothing and the map cannot grow without bound.
       if (this.queues.get(key) === mine) this.queues.delete(key);
     }
   }
 
   private commit(key: string, mark: CheckMark): void {
-    // Re-read rather than trusting the value `run` saw: merging with whatever
-    // is committed now means an emission can only ever add to the record,
-    // never lower it.
     const current = this.committed.get(key);
-    // Re-setting an existing key keeps its insertion position, so a sha that
-    // is emitted again does not get a fresh lease on the ring.
     this.committed.set(key, current === undefined ? mark : mergeMarks(current, mark));
     if (this.committed.size > this.capacity) {
       const oldest = this.committed.keys().next();
@@ -834,12 +624,10 @@ export class CheckGate {
     }
   }
 
-  /** Head shas with a committed mark. */
   get size(): number {
     return this.committed.size;
   }
 
-  /** Head shas with an emission in flight or queued. */
   get inFlight(): number {
     return this.queues.size;
   }

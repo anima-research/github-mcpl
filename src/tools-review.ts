@@ -40,7 +40,6 @@ import {
 const REVIEW_EVENTS: readonly ReviewEvent[] = ['COMMENT', 'APPROVE', 'REQUEST_CHANGES'];
 const DIFF_SIDES: readonly DiffSide[] = ['LEFT', 'RIGHT'];
 
-/** A verdict on code is only a verdict when someone else wrote it. */
 const VERDICT_EVENTS: readonly ReviewEvent[] = ['APPROVE', 'REQUEST_CHANGES'];
 
 /** GitHub logins are case-insensitive. */
@@ -48,14 +47,6 @@ function sameLogin(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }
 
-/**
- * Validate the inline comments, position by position, and hand them on exactly
- * as given: `createReview` must receive the path, line and side the caller
- * named, because a review comment on the wrong line is worse than none.
- *
- * `side` defaults to RIGHT — the post-image, which is what a comment on a
- * proposed change almost always means; LEFT addresses a removed line.
- */
 export function parseReviewComments(value: unknown): ReviewCommentInput[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) throw new ToolArgumentError('"comments" must be an array of inline comments');
@@ -127,14 +118,6 @@ async function requireThreadOnPull(
   return { pull, threadId };
 }
 
-/**
- * A tool result, not a channel delivery: it stays here rather than moving to
- * `content.ts`. WP9 kept the two renderer families apart on purpose —
- * `content.ts` bounds bodies, titles and list length for an event an agent
- * reads as a message, and these renderers bound each *field* (`field()` on the
- * url here) for a result an agent reads as the outcome of its own call. One
- * family cannot do both without dropping bounds.
- */
 function renderSubmittedReview(pull: ThreadRef, review: SubmittedReview, inline: number): string {
   return (
     `submitted ${review.state} review ${review.id} on ${repoSlug(pull.repo)}#${pull.number} with ` +
@@ -244,7 +227,6 @@ async function callReview(name: string, args: Record<string, unknown>, ctx: Tool
       const review = await ctx.api.createReview(pull, {
         event,
         body,
-        // Exactly the positions the caller gave, unreordered and unrounded.
         comments: comments.length > 0 ? comments : undefined,
       });
       return toolResult(renderSubmittedReview(pull, review, comments.length));
@@ -268,7 +250,6 @@ async function callReview(name: string, args: Record<string, unknown>, ctx: Tool
   }
 }
 
-/** The github.review ToolModule the server (.9) registers. */
 export const reviewToolModule: ToolModule = {
   featureSet: REVIEW_FEATURE_SET,
   tools: reviewTools,

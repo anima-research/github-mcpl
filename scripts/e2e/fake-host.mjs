@@ -47,10 +47,6 @@ import { createInterface } from 'node:readline';
 import * as path from 'node:path';
 import { McplConnection, method } from '@animalabs/mcpl-core';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Arguments
-// ─────────────────────────────────────────────────────────────────────────────
-
 const argv = process.argv.slice(2);
 function flag(name, fallback) {
   const i = argv.indexOf(name);
@@ -59,20 +55,9 @@ function flag(name, fallback) {
 
 const serverEntry = flag('--server', path.resolve('dist/src/index.js'));
 const logPath = flag('--log', null);
-/**
- * How long a server gets to honour SIGTERM before it is killed. Ten seconds
- * for a real run — the state flush is the thing being waited for — and
- * overridable so the lifecycle check can exercise the escalation without
- * sitting through it.
- */
 const shutdownGraceMs = Number.parseInt(flag('--shutdown-grace', '10000'), 10);
 const logStream = logPath ? createWriteStream(logPath, { flags: 'a' }) : null;
 
-/**
- * The capability set the manifest declares — `test/harness.ts`'s `FULL_GRANT`.
- * The brief asks for the full grant, so nothing here is conditional: a
- * scenario that wanted a narrower grant would be a different run.
- */
 const FULL_GRANT = [
   'tools',
   'channels.register',
@@ -83,31 +68,16 @@ const FULL_GRANT = [
   'channels.typing',
 ];
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Logging
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** One JSON line to stdout (the operator's transcript) and to `--log`. */
 function emit(obj) {
   const line = JSON.stringify({ t: new Date().toISOString(), ...obj });
   process.stdout.write(line + '\n');
   logStream?.write(line + '\n');
 }
 
-/** Log-only: the frame traffic, which is evidence but not an answer. */
 function trace(obj) {
   logStream?.write(JSON.stringify({ t: new Date().toISOString(), ...obj }) + '\n');
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// The child
-// ─────────────────────────────────────────────────────────────────────────────
-
-// `stdio: pipe` on all three: stdout is the JSON-RPC channel and must not be
-// shared with a terminal, and stderr is the server's diagnostics, which the
-// report cites.
-// A `.js` entry runs under this Node; anything else (the launcher,
-// deploy/github-mcpl) is spawned as the host spawns it, by its own path.
 const [command, args] = serverEntry.endsWith('.js')
   ? [process.execPath, [serverEntry, '--stdio']]
   : [serverEntry, ['--stdio']];
@@ -123,44 +93,11 @@ createInterface({ input: child.stderr }).on('line', (line) => trace({ dir: 'stde
  * after the child has gone never fires.
  */
 let exitInfo = null;
-/**
- * Set before the child is ever signalled, so the exit that follows is known
- * to be the one this host asked for.
- */
 let shuttingDown = false;
-/**
- * The child exited and nobody asked it to.
- *
- * Tracked separately from the per-command failures because an idle crash
- * belongs to no command: the server could die between two commands, or after
- * the last one, and the run would print the exit and still return 0 (review
- * round 2, finding 3) — a scenario file that ends in `quit`, or just ends,
- * looked exactly as green as one the server survived.
- */
 let unexpectedExit = false;
-/**
- * The shutdown this host asked for did not go cleanly (review round 3,
- * finding 2).
- *
- * Asking a server to stop and being told it crashed on the way out is not a
- * successful run: the exit status is how a server reports that its own
- * shutdown failed — a state file it could not flush, a listener that would not
- * close — and a host that only checked *whether* the exit was expected
- * reported `{code: 3, expected: true}` and then returned 0.
- */
 let badShutdown = false;
-/** SIGTERM was ignored long enough that the host had to escalate. */
 let escalated = false;
 
-/**
- * Did the child stop the way a healthy server stops when asked?
- *
- * Two shapes are clean, and only two: it exited 0 under its own signal
- * handler, or it had no handler and died of the SIGTERM this host sent, which
- * is the default disposition and not a fault. Having to escalate to SIGKILL is
- * never clean, whatever the child managed to report on the way out: it means
- * the shutdown this host asked for did not happen inside its grace period.
- */
 function shutdownWasClean(code, signal) {
   if (escalated) return false;
   return code === 0 || (code === null && signal === 'SIGTERM');
@@ -172,8 +109,6 @@ const exited = new Promise((resolve) => {
     const clean = shuttingDown && shutdownWasClean(code, signal);
     if (!shuttingDown) {
       unexpectedExit = true;
-      // Reported as a failed result and not only as the `child-exit` line, so
-      // the one-line-per-failure reading of a transcript stays true.
       emit({
         event: 'result',
         ok: false,
@@ -196,26 +131,16 @@ const exited = new Promise((resolve) => {
   });
 });
 
-/** Rejects if the child ever exits, so a command in flight can race it. */
 const childLost = exited.then((info) => {
   const err = new Error(`the server exited (code ${info.code}, signal ${info.signal}) with this command in flight`);
   err.fatal = true;
   throw err;
 });
-// Every command that wins its race abandons this promise; without a handler of
-// its own, the eventual exit at `quit()` would surface as an unhandled
-// rejection and bury the run's real output.
 childLost.catch(() => {});
 
 const conn = McplConnection.fromStreams(child.stdout, child.stdin);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Recording, and answering as a host does
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** Every request the server sent, in arrival order. */
 const recorded = [];
-/** Pending `wait` commands, checked on every arrival. */
 const waiters = [];
 
 function matches(entry, spec) {
@@ -240,8 +165,6 @@ function record(req) {
 conn.on('request', (req) => {
   record(req);
   switch (req.method) {
-    // The registry announces a thread, and a host that granted
-    // channels.register accepts it.
     case method.CHANNELS_REGISTER:
     case method.CHANNELS_CHANGED: {
       const p = req.params ?? {};
@@ -258,24 +181,13 @@ conn.on('request', (req) => {
       conn.sendResponse(req.id, { accepted: true });
       break;
     default:
-      // Anything else is the server asking for something this host does not
-      // implement; refusing is honest and shows up in the transcript.
       conn.sendError(req.id, -32601, `unexpected ${req.method}`);
   }
 });
 
 conn.on('notification', (notif) => trace({ dir: 'inbound-notification', method: notif.method, params: notif.params }));
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Handshake
-// ─────────────────────────────────────────────────────────────────────────────
-
 async function handshake() {
-  // Raced against the child, like every command: a server that dies on a bad
-  // configuration (an unreadable key, a repository it cannot see) dies before
-  // it answers `initialize`, and waiting out the RPC timeout would report that
-  // as a slow host rather than as the startup failure its stderr already
-  // explains.
   const init = await Promise.race([handshakeRequests(), childLost]);
   emit({ event: 'initialized', serverInfo: init.serverInfo, capabilities: init.capabilities });
   const receipt = await Promise.race([
@@ -294,10 +206,6 @@ async function handshakeRequests() {
   conn.sendNotification('notifications/initialized');
   return { serverInfo: init?.serverInfo, capabilities: init?.capabilities };
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Commands
-// ─────────────────────────────────────────────────────────────────────────────
 
 async function run(c) {
   switch (c.cmd) {
@@ -344,11 +252,6 @@ async function run(c) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Verdicts
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** The text blocks of a tool result, joined — what the refusal reason is in. */
 function textOf(result) {
   return (result?.content ?? [])
     .filter((b) => b?.type === 'text')
@@ -356,22 +259,6 @@ function textOf(result) {
     .join('\n');
 }
 
-/**
- * Did the server actually do what the command asked?
- *
- * Three answer shapes carry a failure inside a perfectly well-formed JSON-RPC
- * *result*, and each one is a scenario that must not read as a pass:
- *
- *   - a tool result with `isError: true` — the refusal shape of MCP;
- *   - a publish that reports `delivered: false`, with the reason it gives
- *     (an empty body, an unroutable channel);
- *   - a rollback receipt with `success: false`, or with entries in
- *     `notUndone` — comments the rollback could not undo. A receipt that
- *     reports leftovers is not a clean rollback however it is labelled.
- *
- * Anything else is taken at face value: this host asserts on shapes it knows
- * and does not try to grade prose.
- */
 function verdictOf(c, result) {
   if (result && typeof result === 'object') {
     if (result.isError === true) return { ok: false, reason: textOf(result) || 'tool reported isError' };
@@ -388,13 +275,6 @@ function verdictOf(c, result) {
   return { ok: true };
 }
 
-/**
- * Run one command, losing the race if the child dies under it.
- *
- * Without this a command sent to a server that has already exited sits until
- * its own timeout — thirty seconds of nothing, reported as a timeout rather
- * than as the crash it was.
- */
 async function runGuarded(c) {
   if (exitInfo) {
     const err = new Error(`the server had already exited (code ${exitInfo.code}, signal ${exitInfo.signal})`);
@@ -404,7 +284,6 @@ async function runGuarded(c) {
   return await Promise.race([run(c), childLost]);
 }
 
-/** A timeout or a dead child: never the connector's considered answer. */
 function isFatal(err) {
   return err?.fatal === true || /timed out/i.test(String(err?.message ?? err)) || isGone(err);
 }
@@ -417,29 +296,17 @@ function isGone(err) {
   return err?.fatal === true || /connection closed/i.test(String(err?.message ?? err));
 }
 
-/** Wait briefly for the child's exit, so a failure can name its code. */
 async function exitCode() {
   if (exitInfo) return exitInfo;
   const grace = new Promise((resolve) => setTimeout(() => resolve(null), 2000));
   return await Promise.race([exited, grace]);
 }
 
-/**
- * Stop the child the way its own signal handlers expect, and wait for it: the
- * poll cursor and the checkpoint lineage are flushed in `SIGTERM`'s handler,
- * and scenario 9 restarts the server against that file. Killing the pipe
- * instead would lose the flush and make the restart scenario a false failure.
- */
 async function quit() {
-  // Before anything else, including the early return: an exit already
-  // recorded was unexpected and stays that way, and an exit still to come is
-  // this shutdown's own.
   shuttingDown = true;
   if (exitInfo) return;
   child.kill('SIGTERM');
   const timer = setTimeout(() => {
-    // Recorded before the signal, so the exit handler — which runs while this
-    // function is still awaiting — already knows the shutdown was escalated.
     escalated = true;
     child.kill('SIGKILL');
   }, shutdownGraceMs);
@@ -447,16 +314,9 @@ async function quit() {
   clearTimeout(timer);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Main
-// ─────────────────────────────────────────────────────────────────────────────
-
 try {
   await handshake();
 } catch (err) {
-  // The server never came up. Its stderr is in the log and says why; this is
-  // the one line that says the run did not start, and it exits non-zero so a
-  // scenario cannot be read as having passed.
   emit({ event: 'result', ok: false, cmd: 'handshake', error: String(err?.message ?? err) });
   await quit();
   logStream?.end();
@@ -468,7 +328,6 @@ let failed = false;
 
 for await (const line of rl) {
   const text = line.trim();
-  // Blank lines and `#` comments keep a scenario file readable.
   if (!text || text.startsWith('#')) continue;
   let c;
   try {
@@ -481,7 +340,6 @@ for await (const line of rl) {
   if (c.cmd === 'quit') break;
   trace({ dir: 'command', c });
 
-  // What happened, before `expectError` is allowed an opinion about it.
   let outcome;
   let fatal = false;
   let gone = false;
@@ -492,8 +350,6 @@ for await (const line of rl) {
   } catch (err) {
     fatal = isFatal(err);
     gone = isGone(err);
-    // Give the exit a moment to land, so the transcript names the status the
-    // server died with instead of only the broken pipe it left behind.
     const info = gone ? await exitCode() : null;
     outcome = {
       ok: false,
@@ -503,10 +359,6 @@ for await (const line of rl) {
     };
   }
 
-  // A scenario whose point is the refusal says so, and then the refusal is the
-  // pass — but a *missing* refusal is a failure, because an allow-list that
-  // let the call through is exactly what such a scenario exists to catch. A
-  // timeout and a dead child are never excused: neither is an answer.
   if (c.expectError && !fatal) {
     outcome = outcome.ok
       ? { ok: false, error: 'expected a refusal and the call succeeded', result: outcome.result }
@@ -516,14 +368,10 @@ for await (const line of rl) {
   if (!outcome.ok) failed = true;
   emit({ event: 'result', cmd: c.cmd, label: c.label, ...outcome });
 
-  // The server is gone; every command after this one would report the same
-  // thing, so stop and let the exit status say so.
   if (gone) break;
 }
 
 await quit();
 conn.close();
 logStream?.end();
-// An idle crash and a failed shutdown each fail the run on their own: no
-// command has to have noticed either.
 process.exit(failed || unexpectedExit || badShutdown ? 1 : 0);
