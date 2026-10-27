@@ -47,10 +47,10 @@ does and does not protect.
 
 Everything after this runs commands out of this repository — step 3 uses a
 script from it before GitHub has even created the App — so the checkout comes
-first. Node 22 or newer (nvm is fine), and one clone:
+first. Node 22.12.0 or newer (nvm is fine), and one clone:
 
 ```sh
-node --version                                      # v22 or newer
+node --version                                      # v22.12.0 or newer
 git clone <this repository> ~/github-mcpl
 cd ~/github-mcpl
 ```
@@ -461,7 +461,7 @@ npm test
 npm run build     # tsc into dist/
 ```
 
-Node 22, ESM, TypeScript. Stdout carries only JSON-RPC: every diagnostic goes
+Node 22.12 or newer, ESM, TypeScript. Stdout carries only JSON-RPC: every diagnostic goes
 through the `Logger`, which writes to stderr. No test in this package reaches
 the network.
 
