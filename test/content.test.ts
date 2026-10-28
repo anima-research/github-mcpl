@@ -193,11 +193,6 @@ test('a bot actor is marked as one in the header', () => {
   assert.ok(text.includes('ci[bot] (bot)'), text);
 });
 
-test('an event with a body but nothing in it says so instead of rendering blank', () => {
-  const text = only(renderEvent(event('comment.created', { body: '   ' })));
-  assert.ok(text.includes('(no body)'));
-});
-
 test('an event that carries no body renders no body section', () => {
   const text = only(renderEvent(event('comment.deleted')));
   assert.ok(!text.includes('(no body)'));

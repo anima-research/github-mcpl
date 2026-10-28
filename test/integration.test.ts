@@ -304,6 +304,7 @@ test('a plain-MCP host sees tools only: no manifest, no push, no channels, no ro
   // server useless to an ordinary MCP client.
   const listed = (await h.host.sendRequest('tools/list', {})) as { tools: { name: string }[] };
   assert.equal(listed.tools.length, h.server.toolDefinitions().length);
+  assert.ok(listed.tools.some((tool) => tool.name === 'comment'));
   assert.match(textOf(await callTool(h, 'get_issue', { number: 41 })), /#41/);
 
   // Every MCPL method does not exist on this connection.
@@ -2083,15 +2084,6 @@ test('finding 5: a publish Notification on an ungranted capability writes nothin
   });
   await h.host.sendRequest(method.MCPL_MANIFEST, {});
   assert.deepEqual(api.callsTo('createComment'), [], 'the refusal was logged, not written');
-});
-
-test('finding 6: plain MCP keeps the whole tool surface', async (t) => {
-  const h = rig(t);
-  await initialize(h, false);
-  const listed = (await h.host.sendRequest('tools/list', {})) as { tools: { name: string }[] };
-  // No grant exists on this connection, so there is nothing to filter by.
-  assert.equal(listed.tools.length, h.server.toolDefinitions().length);
-  assert.ok(listed.tools.some((tool) => tool.name === 'comment'));
 });
 
 test('finding 7: a thread the bot opened is its own thread with no comment on it', async (t) => {

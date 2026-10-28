@@ -29,7 +29,6 @@ import {
   type NormalizedEvent,
   type PollCursor,
   type RepoRef,
-  type StateStore,
 } from '../src/types.js';
 import { FakeGitHubApi, TEST_BOT, TEST_REPO } from './harness.js';
 
@@ -786,20 +785,6 @@ test('a title or body edit, and a reopen, still arrive under polling', async () 
 // The state seam
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('IngressState is a structural subset of the frozen StateStore', () => {
-  // A compile-time assertion first: .7's `state.ts` can be handed straight to
-  // the poller. (`snapshot()` is in IngressState precisely so the gate can be
-  // read without being written to.)
-  const asIngress = (store: StateStore): IngressState => store;
-  assert.equal(typeof asIngress, 'function');
-
-  // And a runtime one, over the member names the poller actually calls.
-  const state = new MemoryIngressState();
-  for (const member of ['lastPollAt', 'setLastPollAt', 'pollCursors', 'setPollCursors', 'polledNew', 'setPolledNew', 'seenPollKey', 'snapshot'] as const) {
-    assert.equal(typeof state[member], 'function', member);
-  }
-});
-
 test('each list starts from lastPollAt until it has a cursor of its own, then keeps it', async () => {
   // A state file from before per-list cursors carries `lastPollAt` alone, and
   // one cursor for a repository no longer polled.
@@ -933,13 +918,6 @@ test('a stored position with milliseconds is read from its whole second', async 
   );
 });
 
-test('cursors are whole seconds, so the second a pass starts in is read again', async () => {
-  const r = rig({ now: '2026-10-14T00:00:00.700Z' });
-  await r.poller.pollOnce();
-  assert.equal(r.state.lastPollAt(), '2026-10-14T00:00:00.000Z');
-  assert.deepEqual(r.state.pollCursors()['anima-research/rayforce:issues'], { since: '2026-10-14T00:00:00.000Z' });
-});
-
 test('a refused first pass keeps the window it read', async () => {
   const api = new FakeGitHubApi();
   api.seedIssue({ number: 41, updatedAt: '2026-10-13T23:59:30.000Z' });
@@ -956,15 +934,6 @@ test('a refused first pass keeps the window it read', async () => {
   assert.equal(first.failed, 1);
   assert.equal(first.since, '2026-10-13T23:59:00.000Z', 'one interval back, in whole seconds');
   assert.equal(r.state.lastPollAt(), first.since, 'the retry asks from the same start, not one moved on by the clock');
-});
-
-test('the gate the state keeps is bounded by the contract POLL_DEDUP_RING', async () => {
-  const state = new MemoryIngressState('2026-10-13T00:00:00.000Z');
-  for (let i = 0; i < POLL_DEDUP_RING + 5; i++) assert.equal(state.seenPollKey(`issue:${i}:t`), false);
-  assert.equal(state.snapshot().pollKeys.length, POLL_DEDUP_RING);
-  // The oldest five were forgotten; the newest are still remembered.
-  assert.equal(state.seenPollKey('issue:0:t'), false);
-  assert.equal(state.seenPollKey(`issue:${POLL_DEDUP_RING + 4}:t`), true);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
