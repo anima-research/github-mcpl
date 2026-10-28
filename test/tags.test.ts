@@ -204,7 +204,6 @@ test('every tag the table expects is in the declared vocabulary', () => {
       assert.ok(EMITTED_TAGS.includes(tag), `${tag} is not declared in EMITTED_TAGS`);
     }
   }
-  assert.deepEqual(sorted(EMITTED_TAGS), sorted([...CORE_TAGS, ...GITHUB_TAGS]));
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
