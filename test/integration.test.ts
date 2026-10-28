@@ -121,6 +121,16 @@ async function refusal(call: Promise<unknown>): Promise<{ code: number; message:
 
 /** JSON-RPC: the method does not exist on this connection. */
 const ERR_METHOD_NOT_FOUND = -32601;
+
+// The server writes to the host in order on one stream, so once the answer to
+// a later request is back, everything it sent before has arrived.
+async function hostCaughtUp(h: Harness): Promise<void> {
+  await h.host.sendRequest('tools/list', {});
+}
+
+function accepted(res: Response): void {
+  assert.ok(res.status >= 200 && res.status < 300, `the delivery was refused with ${res.status}`);
+}
 /** MCPL §6.6: a capability the host did not grant. */
 const ERR_CAPABILITY_DENIED = -32002;
 /** MCPL §8.7: the checkpoint is unknown or pruned. */
@@ -250,8 +260,8 @@ test('a host that grants nothing gets refusals on every tool, channel and push',
 
   // And no push: an event has nowhere to go.
   const deliver = await webhook(t, h);
-  await deliver('issues', fixture('issues.opened.json'), 'denied-1');
-  await new Promise((r) => setTimeout(r, 50));
+  accepted(await deliver('issues', fixture('issues.opened.json'), 'denied-1'));
+  await hostCaughtUp(h);
   assert.deepEqual(pushes(h), [], 'no push/event under an empty grant');
   assert.deepEqual(incoming(h), [], 'and no channels/incoming');
 
@@ -315,8 +325,8 @@ test('a plain-MCP host sees tools only: no manifest, no push, no channels, no ro
 
   // And no event reaches the host: there is no push and no channel.
   const deliver = await webhook(t, h);
-  await deliver('issues', fixture('issues.opened.json'), 'plain-1');
-  await new Promise((r) => setTimeout(r, 50));
+  accepted(await deliver('issues', fixture('issues.opened.json'), 'plain-1'));
+  await hostCaughtUp(h);
   assert.deepEqual(h.hostSaw, [], 'the server sent the host nothing at all');
 });
 
@@ -576,8 +586,8 @@ test('a disabled github.events stops the traffic at once, push and incoming alik
   h.host.sendNotification(method.FEATURE_SETS_UPDATE, { disabled: [EVENTS_FEATURE_SET] });
   await until(() => !h.server.grant.isFeatureSetActive(EVENTS_FEATURE_SET), 'the notification to land');
 
-  await deliver('issues', fixture('issues.closed.json'), 'after-1');
-  await new Promise((r) => setTimeout(r, 50));
+  accepted(await deliver('issues', fixture('issues.closed.json'), 'after-1'));
+  await hostCaughtUp(h);
   assert.equal(pushes(h).length, 1, 'no second push');
   assert.equal(incoming(h).length, 1, 'and no second delivery');
 });
