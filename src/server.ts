@@ -983,16 +983,17 @@ export class GitHubMcplServer {
     };
     const result = await module.call(name, args, ctx);
 
-    // A refused or failed call touched nothing: it may have read a thread on
-    // the way to refusing, and that is not a reason to announce a channel or
-    // to claim the bot has written anywhere.
+    // An error result claims nothing: the call may have read a thread on the
+    // way to refusing, or written where GitHub's answer was lost, and neither
+    // is a reason to announce a channel or to claim the bot has written
+    // anywhere.
     if (result.isError === true) return result;
 
     await this.afterToolCall(name, touches, changes);
 
     // §8.2: a rollback-capable feature set checkpoints after the write, and
     // the result names the checkpoint and its parent. A failed call is not
-    // checkpointed — there is nothing to undo.
+    // checkpointed: nothing it may have done is booked to undo.
     if (module.featureSet !== COMMENTS_FEATURE_SET) return result;
     try {
       return { ...result, state: await this.checkpoint(COMMENTS_FEATURE_SET) };
