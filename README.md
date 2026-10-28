@@ -461,9 +461,9 @@ npm test
 npm run build     # tsc into dist/
 ```
 
-Node 22, ESM, TypeScript. Stdout carries only JSON-RPC: every diagnostic goes
-through the `Logger`, which writes to stderr. No test in this package reaches
-the network.
+Node 22 (`npm test` needs 22.8 or newer), ESM, TypeScript. Stdout carries
+only JSON-RPC: every diagnostic goes through the `Logger`, which writes to
+stderr. No test in this package reaches the network.
 
 | File | Work package | Role |
 | --- | --- | --- |

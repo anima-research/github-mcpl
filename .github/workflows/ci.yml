@@ -10,8 +10,11 @@ permissions:
   contents: read
 
 jobs:
+  # The whole suite runs once, at the oldest Node npm test runs on: its
+  # --experimental-test-isolation flag needs Node 22.8. engines' floor,
+  # 22.0.0, and the newest Node line get the install and start check below.
   typecheck-and-test:
-    name: Typecheck & Test (node 22)
+    name: Typecheck & Test (node 22.8.0)
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -23,7 +26,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: 22
+          node-version: 22.8.0
 
       # npm ci installs the lock verbatim: npm >= 11 'npm install' silently
       # re-resolves platform packages missing from the lock, so only npm ci
@@ -36,3 +39,31 @@ jobs:
 
       - name: Test
         run: npm test
+
+  install-and-start:
+    name: Install & Start (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.0.0', '24']
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Install dependencies (strict lockfile)
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Start
+        run: node scripts/ci-start-check.mjs
