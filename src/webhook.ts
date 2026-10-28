@@ -78,11 +78,11 @@ export interface WebhookListenerOptions {
 }
 
 /** A bounded FIFO set: `add` returns true when the id was already present. */
-class DeliveryRing {
+export class DeliveryRing {
   private readonly seen = new Set<string>();
   private readonly order: string[] = [];
 
-  constructor(private readonly capacity: number) {}
+  constructor(readonly capacity: number) {}
 
   add(id: string): boolean {
     if (this.seen.has(id)) return true;
@@ -171,6 +171,10 @@ export class WebhookListener {
   /** How many delivery ids the ring currently remembers (tests, diagnostics). */
   get rememberedDeliveries(): number {
     return this.ring.size;
+  }
+
+  get dedupCapacity(): number {
+    return this.ring.capacity;
   }
 
   // ── Request handling ──

@@ -1,8 +1,8 @@
 /**
  * Webhook listener (TASK-SRHKG.1.3): the order of the checks is the test.
  *
- * Every case below goes through a real `node:http` server on a loopback port
- * and a real `fetch`, because the properties under test — "rejected before
+ * Every case below but the dedup ring's goes through a real `node:http` server
+ * on a loopback port and a real `fetch`, because the properties under test — "rejected before
  * parsing", "2xx returned before the event is processed", "one stderr line" —
  * are properties of the request path and not of a function.
  */
@@ -13,7 +13,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test, type TestContext } from 'node:test';
-import { MAX_BODY_BYTES, WebhookListener, webhookListenerFromConfig } from '../src/webhook.js';
+import { DELIVERY_DEDUP_RING, DeliveryRing, MAX_BODY_BYTES, WebhookListener, webhookListenerFromConfig } from '../src/webhook.js';
 import { CheckGate } from '../src/normalize.js';
 import { Poller, type IngressState } from '../src/poller.js';
 import type { ChecksSummary, Config, Logger, NormalizedEvent, RepoRef } from '../src/types.js';
@@ -208,25 +208,20 @@ test('a replayed delivery id is dropped and the event is emitted once', async (t
   await r.listener.whenIdle();
   assert.equal(r.events.length, 1);
   assert.equal(r.log.lines.filter((l) => l.includes('replay')).length, 1, r.log.text());
+  assert.equal(r.listener.rememberedDeliveries, 1);
+  assert.equal(r.listener.dedupCapacity, 2000);
 });
 
-test('the dedup gate remembers 2000 ids and then forgets the oldest', async (t) => {
-  const r = await rig(t);
-  const body = fixture('ping.json');
-  // `ping` is answered after the gate check, so it exercises dedup cheaply.
-  for (let i = 0; i < 2000; i++) await r.deliver('ping', body, `gate-${i}`);
-  assert.equal(r.listener.rememberedDeliveries, 2000);
-  // Still remembered at the capacity boundary.
-  assert.equal((await r.deliver('ping', body, 'gate-0')).status, 200);
-  assert.equal(r.log.lines.filter((l) => l.includes('replay')).length, 1);
+test('the dedup ring remembers 2000 ids and then forgets the oldest', () => {
+  const ring = new DeliveryRing(DELIVERY_DEDUP_RING);
+  for (let i = 0; i < 2000; i++) assert.equal(ring.add(`gate-${i}`), false, `gate-${i} is new`);
+  assert.equal(ring.size, 2000);
+  assert.equal(ring.add('gate-0'), true, 'still remembered at the capacity boundary');
 
-  // One more distinct id than the gate holds evicts `gate-1` (the oldest
-  // after `gate-0` was re-seen at the tail is `gate-1`).
-  for (let i = 2000; i < 2002; i++) await r.deliver('ping', body, `gate-${i}`);
-  assert.equal(r.listener.rememberedDeliveries, 2000);
-  assert.equal((await r.deliver('ping', body, 'gate-1')).status, 200);
-  // Re-accepted, not reported as a replay: exactly one replay line so far.
-  assert.equal(r.log.lines.filter((l) => l.includes('replay')).length, 1, r.log.text());
+  for (let i = 2000; i < 2002; i++) assert.equal(ring.add(`gate-${i}`), false, `gate-${i} is new`);
+  assert.equal(ring.size, 2000);
+  assert.equal(ring.add('gate-0'), false, 'two more ids than the ring holds have evicted gate-0, replayed or not');
+  assert.equal(ring.add('gate-1'), false, 'and gate-1');
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
