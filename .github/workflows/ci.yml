@@ -10,11 +10,12 @@ permissions:
   contents: read
 
 jobs:
-  # The whole suite runs once, at the oldest Node npm test runs on: its
-  # --experimental-test-isolation flag needs Node 22.8. engines' floor,
-  # 22.0.0, and the newest Node line get the install and start check below.
+  # The whole suite runs once, at Node 22.12.0. Node 22.8.0 takes npm test's
+  # --experimental-test-isolation=none, but there every test file fails to
+  # load with 'Unknown file extension ".ts"'. engines' floor, 22.0.0, and the
+  # newest Node line get the install and start check below.
   typecheck-and-test:
-    name: Typecheck & Test (node 22.8.0)
+    name: Typecheck & Test (node 22.12.0)
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -26,7 +27,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: 22.8.0
+          node-version: 22.12.0
 
       # npm ci installs the lock verbatim: npm >= 11 'npm install' silently
       # re-resolves platform packages missing from the lock, so only npm ci
