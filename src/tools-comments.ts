@@ -5,7 +5,7 @@ import {
   type StateRollbackResult,
 } from '@animalabs/mcpl-core';
 import { McplRpcError } from './errors.js';
-import { THREAD_PROPERTY, parseThread, type Parsed } from './tool-support.js';
+import { THREAD_PROPERTY, field, parseThread, uncertainWrite, type Parsed } from './tool-support.js';
 import type { GithubStateStore, ThreadLocator } from './state.js';
 import {
   COMMENTS_FEATURE_SET,
@@ -257,23 +257,35 @@ export const COMMENT_TOOLS: ToolDefinition[] = [
 export const commentsToolModule: ToolModule = {
   featureSet: COMMENTS_FEATURE_SET,
   tools: COMMENT_TOOLS,
-  call(name, args, ctx) {
-    switch (name) {
-      case TOOL_COMMENT:
-        return comment(args, ctx);
-      case TOOL_REPLY_IN_THREAD:
-        return replyInThread(args, ctx);
-      case TOOL_EDIT_OWN_COMMENT:
-        return editOwnComment(args, ctx);
-      case TOOL_DELETE_OWN_COMMENT:
-        return deleteOwnComment(args, ctx);
-      case TOOL_UPSERT_STICKY_COMMENT:
-        return upsertStickyComment(args, ctx);
-      default:
-        return Promise.resolve(refuse(`unknown tool: ${name}`));
+  async call(name, args, ctx) {
+    try {
+      return await callComment(name, args, ctx);
+    } catch (err) {
+      const uncertain = uncertainWrite(err);
+      if (!uncertain) throw err;
+      const text = `${field(name)}: ${uncertain} If it did, rollback has no record of it.`;
+      ctx.logger.warn('tool call failed', { tool: field(name), detail: text });
+      return refuse(text);
     }
   },
 };
+
+function callComment(name: string, args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+  switch (name) {
+    case TOOL_COMMENT:
+      return comment(args, ctx);
+    case TOOL_REPLY_IN_THREAD:
+      return replyInThread(args, ctx);
+    case TOOL_EDIT_OWN_COMMENT:
+      return editOwnComment(args, ctx);
+    case TOOL_DELETE_OWN_COMMENT:
+      return deleteOwnComment(args, ctx);
+    case TOOL_UPSERT_STICKY_COMMENT:
+      return upsertStickyComment(args, ctx);
+    default:
+      return Promise.resolve(refuse(`unknown tool: ${name}`));
+  }
+}
 
 async function comment(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   const thread = parseThreadArg(args.thread, ctx);

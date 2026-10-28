@@ -5,10 +5,12 @@ import {
   existsSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const CHANGELOG = "CHANGELOG.md";
 const FRAGMENT_DIR = "changelog.d";
@@ -23,7 +25,7 @@ const HEADINGS = {
 // Refusals throw and set exitCode rather than calling process.exit(), which
 // can cut off a stderr write still pending: Node writes to a pipe
 // asynchronously on POSIX.
-class ReleaseError extends Error {}
+export class ReleaseError extends Error {}
 const fail = (msg) => {
   throw new ReleaseError(msg);
 };
@@ -36,10 +38,10 @@ const isHeading = (s) => /^#{1,6}(\s|$)/.test(s);
 const isRule = (s) => /^([-*_=])(\s*\1){2,}\s*$/.test(s);
 const isBlockConstruct = (l) => isRule(l.trim()) || isHeading(itemContent(l));
 
-function collectFragments() {
+function collectFragments(dir) {
   const fragments = [];
-  if (!existsSync(FRAGMENT_DIR)) return fragments;
-  const entries = readdirSync(FRAGMENT_DIR, { withFileTypes: true }).sort(
+  if (!existsSync(join(dir, FRAGMENT_DIR))) return fragments;
+  const entries = readdirSync(join(dir, FRAGMENT_DIR), { withFileTypes: true }).sort(
     (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
   );
   for (const entry of entries) {
@@ -59,7 +61,7 @@ function collectFragments() {
           `'<slug>.<${CATEGORIES.join("|")}>.md' so the entry is not silently stranded.`,
       );
     }
-    const body = readFileSync(join(FRAGMENT_DIR, name), "utf8").trim();
+    const body = readFileSync(join(dir, FRAGMENT_DIR, name), "utf8").trim();
     if (!body) fail(`${FRAGMENT_DIR}/${name}: empty fragment.`);
     const offending = body
       .split("\n")
@@ -117,10 +119,10 @@ function mergeFragments(body, frags) {
   return chunks.join("\n\n");
 }
 
-function main() {
-  const { version } = JSON.parse(readFileSync("package.json", "utf8"));
-  const text = readFileSync(CHANGELOG, "utf8");
-  const fragments = collectFragments();
+export function release(dir) {
+  const { version } = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+  const text = readFileSync(join(dir, CHANGELOG), "utf8");
+  const fragments = collectFragments(dir);
 
   const headings = [...text.matchAll(/^## Unreleased[ \t]*$/gm)];
   if (headings.length === 0) {
@@ -155,22 +157,36 @@ function main() {
 
   const date = new Date().toISOString().slice(0, 10);
   writeFileSync(
-    CHANGELOG,
+    join(dir, CHANGELOG),
     text.slice(0, header.index) +
       `## Unreleased\n\n## ${version} — ${date}\n\n${merged}\n\n` +
       rest,
   );
-  for (const f of fragments) unlinkSync(join(FRAGMENT_DIR, f.name));
-  console.log(
+  for (const f of fragments) unlinkSync(join(dir, FRAGMENT_DIR, f.name));
+  return (
     `${CHANGELOG}: released '## ${version} — ${date}' from ${fragments.length} ` +
-      "fragment(s) plus the Unreleased section.",
+    "fragment(s) plus the Unreleased section."
   );
 }
 
-try {
-  main();
-} catch (e) {
-  if (!(e instanceof ReleaseError)) throw e;
-  console.error(`release-changelog: ${e.message}`);
-  process.exitCode = 1;
+// import.meta.url names the script's real path, and argv[1] the path it was
+// run by, which a symlink can differ from. When a module imports this one,
+// argv[1] is that program's, and need not name a file at all.
+function isMain() {
+  if (process.argv[1] === undefined) return false;
+  try {
+    return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+}
+
+if (isMain()) {
+  try {
+    console.log(release(process.cwd()));
+  } catch (e) {
+    if (!(e instanceof ReleaseError)) throw e;
+    console.error(`release-changelog: ${e.message}`);
+    process.exitCode = 1;
+  }
 }

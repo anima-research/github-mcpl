@@ -51,11 +51,11 @@ export interface WebhookListenerOptions {
   maxBodyBytes?: number;
 }
 
-class DeliveryRing {
+export class DeliveryRing {
   private readonly seen = new Set<string>();
   private readonly order: string[] = [];
 
-  constructor(private readonly capacity: number) {}
+  constructor(readonly capacity: number) {}
 
   add(id: string): boolean {
     if (this.seen.has(id)) return true;
@@ -135,6 +135,10 @@ export class WebhookListener {
 
   get rememberedDeliveries(): number {
     return this.ring.size;
+  }
+
+  get dedupCapacity(): number {
+    return this.ring.capacity;
   }
 
   private handle(req: IncomingMessage, res: ServerResponse): void {
