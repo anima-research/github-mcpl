@@ -1,20 +1,8 @@
 /**
- * github.review — submitting a review and resolving review threads
- * (TASK-SRHKG.1.6).
- *
- *   create_review     — COMMENT | APPROVE | REQUEST_CHANGES, with inline
- *                       comments on diff lines.
- *   resolve_thread    — mark a review thread resolved.
- *   unresolve_thread  — reopen one.
- *
- * Not rollback-capable: GitHub has no API to withdraw a submitted review, so
- * nothing here can be undone and the declaration says so (ROLLBACK_CAPABLE).
- *
- * The refusal that matters: a clone must not approve or demand changes on its
- * own pull request. A verdict on one's own work is not review, and GitHub's own
- * 422 would arrive too late to be legible, so the author is checked against
- * GITHUB_BOT_LOGIN first and the refusal names the login. A plain COMMENT
- * review on its own pull request is allowed — that is just talking.
+ * GitHub has no API to withdraw a submitted review, so these tools aren't
+ * rollback-capable. GitHub refuses a verdict on one's own pull request with a
+ * 422, so the author is checked against GITHUB_BOT_LOGIN first and the refusal
+ * names the login.
  */
 
 import {
@@ -52,22 +40,13 @@ import {
 const REVIEW_EVENTS: readonly ReviewEvent[] = ['COMMENT', 'APPROVE', 'REQUEST_CHANGES'];
 const DIFF_SIDES: readonly DiffSide[] = ['LEFT', 'RIGHT'];
 
-/** A verdict on code is only a verdict when someone else wrote it. */
 const VERDICT_EVENTS: readonly ReviewEvent[] = ['APPROVE', 'REQUEST_CHANGES'];
 
-/** GitHub logins are case-insensitive; `rayforce-clone[bot]` is one login. */
+/** GitHub logins are case-insensitive. */
 function sameLogin(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }
 
-/**
- * Validate the inline comments, position by position, and hand them on exactly
- * as given: `createReview` must receive the path, line and side the caller
- * named, because a review comment on the wrong line is worse than none.
- *
- * `side` defaults to RIGHT — the post-image, which is what a comment on a
- * proposed change almost always means; LEFT addresses a removed line.
- */
 export function parseReviewComments(value: unknown): ReviewCommentInput[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) throw new ToolArgumentError('"comments" must be an array of inline comments');
@@ -102,11 +81,9 @@ export function parseReviewComments(value: unknown): ReviewCommentInput[] {
 }
 
 /**
- * The review thread id `resolve_thread` takes is the GraphQL node id that
- * `list_review_threads` prints, not the channel-level `rt:<comment id>`. The
- * two name different things (contract notes, "GitHubApi signatures"), so the
- * channel form is refused with the difference spelled out instead of being
- * silently sent to an API that would 404.
+ * `resolve_thread` takes the GraphQL node id `list_review_threads` prints, not
+ * the channel's `rt:<comment id>`, so that form is refused with the
+ * difference named.
  */
 export function requireReviewThreadId(args: Record<string, unknown>): string {
   const threadId = requireString(args, 'threadId');
@@ -121,19 +98,8 @@ export function requireReviewThreadId(args: Record<string, unknown>): string {
 }
 
 /**
- * A review thread this server is allowed to touch, established rather than
- * assumed.
- *
- * A GraphQL node id names a thread without naming its repository, so checking
- * the `repo` argument proves nothing about the node the call then mutates: a
- * node id from any repository the installation can reach would be resolved —
- * and the confirmation would name the allowed repository, which is worse than
- * failing. So the pull request is named too, and the thread has to be one of
- * *its* threads: the repository allow-list is checked on the pull request
- * (`resolveThread`), and membership on the list GitHub returns for it.
- *
- * The cost is one extra read per resolve, which is the price of the id being
- * unforgeable here.
+ * A GraphQL node id names a thread without its repository, so the pull request
+ * is named too and the thread has to be one of its threads.
  */
 async function requireThreadOnPull(
   args: Record<string, unknown>,
@@ -152,14 +118,6 @@ async function requireThreadOnPull(
   return { pull, threadId };
 }
 
-/**
- * A tool result, not a channel delivery: it stays here rather than moving to
- * `content.ts`. WP9 kept the two renderer families apart on purpose —
- * `content.ts` bounds bodies, titles and list length for an event an agent
- * reads as a message, and these renderers bound each *field* (`field()` on the
- * url here) for a result an agent reads as the outcome of its own call. One
- * family cannot do both without dropping bounds.
- */
 function renderSubmittedReview(pull: ThreadRef, review: SubmittedReview, inline: number): string {
   return (
     `submitted ${review.state} review ${review.id} on ${repoSlug(pull.repo)}#${pull.number} with ` +
@@ -269,7 +227,6 @@ async function callReview(name: string, args: Record<string, unknown>, ctx: Tool
       const review = await ctx.api.createReview(pull, {
         event,
         body,
-        // Exactly the positions the caller gave, unreordered and unrounded.
         comments: comments.length > 0 ? comments : undefined,
       });
       return toolResult(renderSubmittedReview(pull, review, comments.length));
@@ -293,7 +250,6 @@ async function callReview(name: string, args: Record<string, unknown>, ctx: Tool
   }
 }
 
-/** The github.review ToolModule the server (.9) registers. */
 export const reviewToolModule: ToolModule = {
   featureSet: REVIEW_FEATURE_SET,
   tools: reviewTools,
