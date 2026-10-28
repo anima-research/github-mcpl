@@ -10,13 +10,13 @@ permissions:
   contents: read
 
 jobs:
+  # The whole suite runs once, at Node 22.12.0, engines' floor. The install
+  # and start check below runs on Node 24, a maintenance LTS line hosts still
+  # run, and on the newest Node release.
   typecheck-and-test:
-    name: Typecheck & Test (node ${{ matrix.node }})
+    name: Typecheck & Test (node 22.12.0)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    strategy:
-      matrix:
-        node: [22, 24]
 
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -26,7 +26,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: ${{ matrix.node }}
+          node-version: 22.12.0
 
       # npm ci installs the lock verbatim: npm >= 11 'npm install' silently
       # re-resolves platform packages missing from the lock, so only npm ci
@@ -39,3 +39,31 @@ jobs:
 
       - name: Test
         run: npm test
+
+  install-and-start:
+    name: Install & Start (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['24', 'latest']
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Install dependencies (strict lockfile)
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Start
+        run: node scripts/ci-start-check.mjs
