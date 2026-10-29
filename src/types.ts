@@ -1453,9 +1453,10 @@ function readBaseAllow(
 
 /**
  * Validate the environment into a {@link Config}, or throw {@link ConfigError}
- * listing every problem by variable name.
+ * listing every problem by variable name. Broad multi-owner write allow-lists
+ * are accepted but warned about on stderr (or the supplied startup logger).
  */
-export function readConfig(env: Env = process.env): Config {
+export function readConfig(env: Env = process.env, logger: Logger = stderrLogger()): Config {
   const problems: string[] = [];
 
   // ── Which mode: App key, or a contributor's own token ──
@@ -1625,6 +1626,20 @@ export function readConfig(env: Env = process.env): Config {
   }
 
   if (problems.length > 0) throw new ConfigError(problems);
+
+  if (new Set(repos.map((repo) => repo.owner.toLowerCase())).size > 1) {
+    for (const [name, entries] of [
+      ['GITHUB_MERGE_BASE_ALLOW', mergeBaseAllow],
+      ['GITHUB_WORKFLOW_ALLOW', workflowAllow],
+    ] as const) {
+      if (entries.some((entry) => !entry.includes(':'))) {
+        logger.warn(
+          `${name}: unscoped entries apply to every repository in GITHUB_REPOS, including third-party ` +
+          `upstreams. Multiple owners are configured; use owner/name:value to limit each write permission.`,
+        );
+      }
+    }
+  }
 
   return {
     authMode,

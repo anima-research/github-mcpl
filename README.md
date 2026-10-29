@@ -330,7 +330,14 @@ Setting both `GITHUB_TOKEN_FILE` and the App variables is a startup error, and s
 user token, never an App installation token. The host grant and `GITHUB_REPOS`
 still apply. `GITHUB_MERGE_BASE_ALLOW` and `GITHUB_WORKFLOW_ALLOW` are empty by
 default in both modes: enabling a feature set alone authorizes no merge or
-workflow write. Pass the reviewed head `sha` to merge/update; the tools send
+workflow write. An **unscoped** entry such as `main` or `review.yml` applies to
+**every repository in `GITHUB_REPOS`**, including a third party's upstream in a
+multi-owner contributor deployment. Use `owner/name:branch` and
+`owner/name:file` to authorize only the intended repository, for example
+`GITHUB_MERGE_BASE_ALLOW=my-login/my-fork:main` and
+`GITHUB_WORKFLOW_ALLOW=my-login/my-fork:review.yml`. Startup warns (but does not
+refuse or narrow permissions) when either list contains an unscoped entry and
+`GITHUB_REPOS` spans multiple owners. Pass the reviewed head `sha` to merge/update; the tools send
 GitHub the full current head sha as the write guard. `update_branch` refuses
 fork heads (even the token owner's fork) and heads that are bases, protected,
 default, or targeted by another open pull request. It also refuses when those
@@ -360,7 +367,7 @@ account. There is no permission escalation or App-token fallback.
 
 **What it can't see.** Threads you aren't part of, pushes, and the checks on pull requests the token's user didn't open. GitHub lists a pull request's thread when someone pushes to it, but none of what this mode reads of a thread shows a push, so it delivers nothing for one. The agent learns of new commits from what comes with them, from a check result, or by reading the pull request. An edit to an open pull request arrives as nothing, as with a webhook delivery. A mention arrives with the comment, review or opening that carries it.
 
-**Security.** A user token can do whatever its user can, wherever the user can. The tools' allow-list (`GITHUB_REPOS`) and the absence of merge still apply, but they're the server's limits, not GitHub's. An `APPROVE` through `github.review` is the user's own approval, and counts toward branch protection wherever the user has write access; the shipped recipe doesn't enable that feature set.
+**Security.** A user token can do whatever its user can, wherever the user can. The tools' repository and merge/workflow allow-lists still apply, but they're the server's limits, not GitHub's. An `APPROVE` through `github.review` is the user's own approval, and counts toward branch protection wherever the user has write access; the shipped recipe doesn't enable that feature set.
 
 The recipe is App mode's contributor one, [`examples/recipe-contributor.json`](examples/recipe-contributor.json): its wake policies serve both modes, and the launcher reads this mode's variables from the same environment file.
 
