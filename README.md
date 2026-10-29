@@ -324,7 +324,29 @@ For a resident that contributes to repositories it **cannot install the App on**
 
 Setting both `GITHUB_TOKEN_FILE` and the App variables is a startup error, and so is `GITHUB_APP_INSTALLATION_ID`. `GITHUB_WEBHOOK_PORT` is refused in this mode: GitHub doesn't send webhooks for repositories you don't administer.
 
-**The token.** GitHub serves the notifications endpoints to a personal access token (classic) only; a fine-grained token can't read them. Give it the narrowest scopes that work: `notifications`, plus `public_repo` when the repositories are public. `repo` is full read and write access to every private repository the account can reach, so use it only when a private repository needs it.
+**The token.** GitHub serves the notifications endpoints to a personal access token (classic) only; a fine-grained token can't read them. Give it the narrowest scopes that work: `notifications`, plus `public_repo` when the repositories are public. `repo` is full read and write access to every private repository the account can reach, so use it only when a repository or an enabled operation needs it (see the workflow scope requirement below).
+
+**Merge, reviews and Actions with a user token.** These tools use that same
+user token, never an App installation token. The host grant and `GITHUB_REPOS`
+still apply. `GITHUB_MERGE_BASE_ALLOW` and `GITHUB_WORKFLOW_ALLOW` are empty by
+default in both modes: enabling a feature set alone authorizes no merge or
+workflow write. Pass the reviewed head `sha` to merge/update; the tools send
+GitHub the full current head sha as the write guard. `update_branch` refuses
+fork heads (even the token owner's fork) and heads that are bases, protected,
+default, or targeted by another open pull request. It also refuses when those
+branch facts cannot be read. This is intentionally narrower than GitHub's UI.
+
+Scopes do not give the account repository rights it lacks. GitHub documents
+`repo` for classic-token [workflow dispatch](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)
+and [workflow re-runs](https://docs.github.com/en/rest/actions/workflow-runs#re-run-a-workflow),
+not merely `public_repo`; do not broaden a token just to silence a refusal.
+Changing workflow files can also need the separate
+[`workflow` scope](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps#available-scopes).
+GraphQL review reads and thread resolution use the user's access; missing
+[GraphQL permissions](https://docs.github.com/en/graphql/guides/forming-calls-with-graphql#authenticating-with-graphql)
+are returned as tool errors, as are REST permission failures. Synthetic tests
+cover successful requests and refusals, not the permissions of a deployed
+account. There is no permission escalation or App-token fallback.
 
 **The account.** Use an account the agent alone posts from, such as a machine account. GitHub shows the agent's comments, reviews and pull requests as that account's, and this server treats everything that account does as the agent's own: its own events are tagged from-self and don't wake it, and the comment tools let it edit and delete that account's comments. This is account ownership, not proof that this process wrote a comment. A human's later edits are not protected by a version check: an edit or sticky update can overwrite them, and rollback can restore an older body or delete an agent-created comment after a human changed it. Do not share the posting account or treat rollback as safe concurrent editing.
 
