@@ -15,6 +15,10 @@ import { chmodSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { PassThrough } from 'node:stream';
+import { McplConnection } from '@animalabs/mcpl-core';
+import { GitHubAdapter } from '../src/github-adapter.js';
+import { GitHubMcplServer } from '../src/server.js';
 import { mergeToolModule } from '../src/tools-merge.js';
 import { actionsToolModule } from '../src/tools-actions.js';
 import { commentsToolModule } from '../src/tools-comments.js';
@@ -334,4 +338,87 @@ test('readConfig default startup warnings go only to stderr and name both broad 
   assert.match(child.stderr, /warn GITHUB_MERGE_BASE_ALLOW:/);
   assert.match(child.stderr, /warn GITHUB_WORKFLOW_ALLOW:/);
   assert.ok(!child.stderr.includes('synthetic-stderr-token'));
+});
+
+
+test('contributor merge and Actions traverse host grants, server tools/call and user-token transport', async (t) => {
+  const token = 'synthetic-server-contributor-token';
+  const cfg = readConfig({
+    GITHUB_TOKEN_FILE: tmpFile('token', token), GITHUB_BOT_LOGIN: 'a-human',
+    GITHUB_REPOS: 'mine/fork', GITHUB_MERGE_BASE_ALLOW: 'mine/fork:main',
+    GITHUB_WORKFLOW_ALLOW: 'mine/fork:review.yml',
+  });
+  assert.equal(cfg.authMode, 'token');
+  const head = 'a'.repeat(40);
+  const calls: Request[] = [];
+  const bodies: unknown[] = [];
+  const api = new GitHubAdapter(cfg, {
+    baseUrl: 'https://synthetic.invalid', logger: silentLogger(),
+    // No global fetch: every request is answered here, and unexpected routes fail.
+    fetch: async (input, init) => {
+      const req = new Request(input, init);
+      calls.push(req);
+      assert.equal(req.headers.get('authorization'), `token ${token}`);
+      const route = `${req.method} ${new URL(req.url).pathname}`;
+      const json = (body: unknown) => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+      switch (route) {
+        case 'GET /repos/mine/fork/pulls/12':
+          return json({ number: 12, state: 'open', draft: false, merged: false,
+            head: { ref: 'feature', sha: head, repo: { owner: { login: 'mine' }, name: 'fork' } },
+            base: { ref: 'main', sha: 'b'.repeat(40) }, user: { login: 'a-human', type: 'User' } });
+        case `GET /repos/mine/fork/commits/${head}/check-runs`:
+          return json({ total_count: 0, check_runs: [] });
+        case 'PUT /repos/mine/fork/pulls/12/merge':
+          bodies.push(await req.json());
+          return json({ merged: true, sha: head, message: 'Merged' });
+        case 'POST /repos/mine/fork/actions/workflows/review.yml/dispatches':
+          bodies.push(await req.json());
+          return new Response(null, { status: 204 });
+        default:
+          assert.fail(`unexpected request (including any App-token path): ${route}`);
+      }
+    },
+  });
+  const toServer = new PassThrough();
+  const toHost = new PassThrough();
+  const host = McplConnection.fromStreams(toHost, toServer);
+  const server = new GitHubMcplServer(api, {
+    botLogin: cfg.botLogin, repos: cfg.repos, prBaseAllow: cfg.prBaseAllow,
+    mergeBaseAllow: cfg.mergeBaseAllow, workflowAllow: cfg.workflowAllow, logger: silentLogger(),
+  });
+  server.register(mergeToolModule);
+  server.register(actionsToolModule);
+  const served = server.serve(McplConnection.fromStreams(toServer, toHost));
+  t.after(async () => { toServer.end(); await served; host.close(); });
+  await host.sendRequest('initialize', {
+    protocolVersion: '2024-11-05', capabilities: { experimental: { mcpl: { version: '0.5' } } },
+    clientInfo: { name: 'synthetic-contributor-host', version: '0' },
+  });
+  host.sendNotification('notifications/initialized');
+  const invoke = (name: string, args: Record<string, unknown>) =>
+    host.sendRequest('tools/call', { name, arguments: args }) as Promise<ToolResult>;
+  const operations = [
+    ['merge_pull_request', { number: 12, sha: head }],
+    ['dispatch_workflow', { workflow: 'review.yml', ref: 'main' }],
+  ] as const;
+  for (const [name, args] of operations) {
+    await assert.rejects(invoke(name, args), (err: { code?: number }) => err.code === -32002);
+  }
+  assert.equal(calls.length, 0, 'no transport before the host grants tools');
+  await host.sendRequest('featureSets/update', { effectiveCapabilities: ['tools'] });
+  assert.equal(server.grant.isFeatureSetActive('github.merge'), true);
+  assert.equal(server.grant.isFeatureSetActive('github.actions'), true);
+  for (const [name, args] of operations) {
+    const out = await invoke(name, args);
+    assert.equal(out.isError, undefined, JSON.stringify(out));
+    assert.ok(!JSON.stringify(out).includes(token));
+  }
+  assert.deepEqual(bodies, [{ merge_method: 'merge', sha: head }, { ref: 'main', inputs: {} }]);
+  assert.ok(calls.every((req) => !new URL(req.url).pathname.includes('/app')));
+  const beforeRevocation = calls.length;
+  await host.sendRequest('featureSets/update', { effectiveCapabilities: [] });
+  for (const [name, args] of operations) {
+    await assert.rejects(invoke(name, args), (err: { code?: number }) => err.code === -32002);
+  }
+  assert.equal(calls.length, beforeRevocation, 'revoked grants stop both tools before transport');
 });
