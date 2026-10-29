@@ -656,6 +656,7 @@ export class GitHubMcplServer {
    * registry (registration is per-host, §14.5) and the thread memory.
    */
   async serve(conn: McplConnection): Promise<void> {
+    conn.on('error', (err) => this.logger.error('connection error', { error: String(err) }));
     this.conn = conn;
     this.grant.reset();
     this.channels = new ChannelRegistry({
@@ -1279,21 +1280,29 @@ export class GitHubMcplServer {
   // ── The event pipeline ────────────────────────────────────────────────────
 
   /**
-   * Both ingress paths hand every event here: the webhook listener and the
-   * poller take this as their `onEvent`, so one pipeline tags, renders and
-   * forwards whatever arrived, however it arrived.
+   * Every ingress path hands its events here: App mode's webhook listener and
+   * repository poller, and contributor mode's notifications poller, take this
+   * as their `onEvent`, so one pipeline tags, renders and forwards whatever
+   * arrived, however it arrived.
    */
-  readonly onEvent = (event: NormalizedEvent): Promise<void> => this.handleEvent(event);
+  /** Whether contributor polling has any currently connected, granted egress. */
+  readonly canReceiveEvents = (): boolean => {
+    const conn = this.conn;
+    return !!conn && !conn.isClosed &&
+      (this.eventEgressAllowed(conn, 'push') || this.eventEgressAllowed(conn, 'incoming'));
+  };
 
-  private async handleEvent(event: NormalizedEvent): Promise<void> {
+  readonly onEvent = (event: NormalizedEvent): Promise<boolean> => this.handleEvent(event);
+
+  private async handleEvent(event: NormalizedEvent): Promise<boolean> {
     const conn = this.conn;
     // Plain MCP has no push and no channels: an event has nowhere to go.
-    if (!conn || !this.mcplEnabled) return;
+    if (!conn || !this.mcplEnabled) return false;
     // Nothing to do at all. Each egress is asked again at its own send, so
     // this is only the cheap way out of an event no path wants: see
     // {@link GitHubMcplServer.eventEgressAllowed} for why the answer here is
     // never the one the sends rely on.
-    if (!this.eventEgressAllowed(conn, 'push') && !this.eventEgressAllowed(conn, 'incoming')) return;
+    if (!this.eventEgressAllowed(conn, 'push') && !this.eventEgressAllowed(conn, 'incoming')) return false;
 
     let tags: string[];
     let metadata: EventMetadata;
@@ -1306,7 +1315,7 @@ export class GitHubMcplServer {
       content = renderEvent(event);
     } catch (err) {
       this.logger.error('event pipeline failed', { event: event.id, error: (err as Error).message });
-      return;
+      return false;
     }
 
     // A top-level comment that is *gone* is a removal, whoever removed it and
@@ -1351,9 +1360,12 @@ export class GitHubMcplServer {
     // A thread's channel first, so a host that has the channel sees the
     // message there before the push that also describes it. Asked here *and*
     // inside the registry, which is where the send finally happens.
+    let delivered = false;
     if (event.thread && this.eventEgressAllowed(conn, 'incoming')) {
       try {
-        await this.registry().deliver(event, tags, metadata, content);
+        const outcome = await this.registry().deliver(event, tags, metadata, content);
+        delivered = outcome.delivered;
+        if (!outcome.delivered) this.logger.warn('channel delivery declined', { event: event.id, reason: outcome.reason });
       } catch (err) {
         this.logger.warn('channel delivery failed', { event: event.id, error: (err as Error).message });
       }
@@ -1362,7 +1374,7 @@ export class GitHubMcplServer {
     // push/event for *every* event — including the ones with no thread (a
     // push, a repository-level change), which belong to no channel at all.
     // Re-asked after the channel delivery, which awaited the host.
-    if (!this.eventEgressAllowed(conn, 'push')) return;
+    if (!this.eventEgressAllowed(conn, 'push')) return delivered;
     const params: PushEventParams = {
       featureSet: EVENTS_FEATURE_SET,
       eventId: event.id,
@@ -1387,9 +1399,14 @@ export class GitHubMcplServer {
       payload: { content },
     };
     try {
-      await conn.sendRequest(method.PUSH_EVENT, params);
+      const result = await conn.sendRequest(method.PUSH_EVENT, params) as { accepted?: boolean } | undefined;
+      // Either granted egress accepting is delivery. A declined sibling must
+      // not make the notifications poller re-send an already accepted event.
+      if (result?.accepted === false) this.logger.warn('push/event declined', { event: event.id });
+      return delivered || result?.accepted !== false;
     } catch (err) {
       this.logger.warn('push/event failed', { event: event.id, error: (err as Error).message });
+      return delivered;
     }
   }
 
@@ -1432,8 +1449,9 @@ export class GitHubMcplServer {
    * What `tagsFor` cannot derive from the event alone.
    *
    * `merged` and `reviewRequestedForSelf` come out of the raw payload the
-   * ingress kept: `pull_request.merged` is the only thing that tells a close
-   * from a merge, and `requested_reviewer.login` the only thing that says
+   * ingress kept: a webhook's `pull_request.merged`, or a polled row's
+   * `merged`, is the only thing that tells a close from a merge, and
+   * `requested_reviewer.login` the only thing that says
    * whether *this* bot was the one asked. `isOwnThread` and `isReplyToSelf`
    * come from the thread's comment history.
    */
@@ -1862,14 +1880,19 @@ function threadFromAddress(address: unknown): ThreadRef | null {
 }
 
 /**
- * `pull_request.merged` out of the raw payload — the only field that tells a
- * merged pull request from a closed one, and it never reaches `tagsFor`
- * (`raw` stays in the pipeline). Undefined means "not known to be merged".
+ * Whether a closed pull request was merged, out of the raw payload: a
+ * webhook's `pull_request.merged`, or a polled row's `merged` (from its
+ * `pull_request.merged_at`). It's the only field that tells a merge from a
+ * close, and it never reaches `tagsFor` (`raw` stays in the pipeline).
+ * Undefined means "not known to be merged".
  */
 function mergedFlag(event: NormalizedEvent): boolean | undefined {
   if (event.kind !== 'pull.closed') return undefined;
   const raw = event.raw;
   if (!raw || typeof raw !== 'object') return undefined;
+  // A polled row (PolledIssue) says it outright; a webhook payload nests it.
+  const polled = (raw as Record<string, unknown>).merged;
+  if (typeof polled === 'boolean') return polled;
   const pull = (raw as Record<string, unknown>).pull_request;
   if (!pull || typeof pull !== 'object') return undefined;
   const merged = (pull as Record<string, unknown>).merged;
