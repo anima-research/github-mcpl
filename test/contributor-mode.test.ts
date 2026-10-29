@@ -10,10 +10,13 @@
  */
 
 import { strict as assert } from 'node:assert';
+import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { mergeToolModule } from '../src/tools-merge.js';
+import { actionsToolModule } from '../src/tools-actions.js';
 import { commentsToolModule } from '../src/tools-comments.js';
 import {
   ConfigError,
@@ -255,4 +258,80 @@ test('token-file privacy checks the symlink target mode, not symlink provenance'
   const problems = problemsOf(env);
   assert.ok(problems.some((problem) => problem.includes('must be 600')));
   assert.ok(problems.every((problem) => !problem.includes('synthetic-token-only')));
+});
+
+
+test('multi-owner contributor allow-lists: unscoped writes reach both repositories; scopes isolate either direction', async () => {
+  const repos = [{ owner: 'my-login', name: 'my-fork' }, { owner: 'third-party', name: 'upstream' }];
+  const tokenFile = tmpFile('token', 'synthetic-scope-token');
+  for (const scope of [undefined, ...repos.map((repo) => `${repo.owner}/${repo.name}`)]) {
+    const cfg = readConfig({
+      GITHUB_TOKEN_FILE: tokenFile,
+      GITHUB_REPOS: repos.map((repo) => `${repo.owner}/${repo.name}`).join(','),
+      GITHUB_MERGE_BASE_ALLOW: scope ? `${scope}:main` : 'main',
+      GITHUB_WORKFLOW_ALLOW: scope ? `${scope}:review.yml` : 'review.yml',
+    }, silentLogger());
+    const api = new FakeGitHubApi();
+    const ctx: ToolContext = {
+      api, state: GithubState.empty(), botLogin: 'my-login', repos: cfg.repos,
+      prBaseAllow: [], mergeBaseAllow: cfg.mergeBaseAllow, workflowAllow: cfg.workflowAllow,
+      logger: silentLogger(),
+    };
+    for (const repo of repos) {
+      const slug = `${repo.owner}/${repo.name}`;
+      const head = 'a'.repeat(40);
+      api.seedPullRequest({ repo, number: 12, base: { ref: 'main', sha: 'b'.repeat(40) }, head: { ref: 'feature', sha: head } });
+      api.clearCalls();
+      const merge = await mergeToolModule.call('merge_pull_request', { repo: slug, number: 12, sha: head }, ctx);
+      const dispatch = await actionsToolModule.call('dispatch_workflow', { repo: slug, workflow: 'review.yml', ref: 'main' }, ctx);
+      const allowed = scope === undefined || scope === slug;
+      for (const result of [merge, dispatch]) assert.equal(result.isError, allowed ? undefined : true, `${scope ?? 'unscoped'} -> ${slug}`);
+      assert.equal(api.callsTo('mergePullRequest').length, allowed ? 1 : 0);
+      assert.equal(api.callsTo('dispatchWorkflow').length, allowed ? 1 : 0);
+    }
+  }
+});
+
+test('multi-owner unscoped merge/workflow config warns per variable without refusing or narrowing', () => {
+  const base = { GITHUB_TOKEN_FILE: tmpFile('token', 'synthetic-warning-token'), GITHUB_REPOS: 'mine/fork,upstream/project' };
+  for (const variable of ['GITHUB_MERGE_BASE_ALLOW', 'GITHUB_WORKFLOW_ALLOW'] as const) {
+    const warnings: string[] = [];
+    const cfg = readConfig({ ...base, [variable]: variable === 'GITHUB_MERGE_BASE_ALLOW' ? 'main,mine/fork:dev' : 'review.yml,mine/fork:ci.yml' }, {
+      ...silentLogger(), warn: (message) => warnings.push(message),
+    });
+    assert.equal(cfg.authMode, 'token');
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], new RegExp(variable));
+    assert.match(warnings[0], /every repository in GITHUB_REPOS/);
+    assert.match(warnings[0], /third-party upstreams/);
+    assert.match(warnings[0], /owner\/name:value/);
+    assert.ok(!warnings[0].includes('synthetic-warning-token'));
+    assert.deepEqual(variable === 'GITHUB_MERGE_BASE_ALLOW' ? cfg.mergeBaseAllow : cfg.workflowAllow,
+      variable === 'GITHUB_MERGE_BASE_ALLOW' ? ['main', 'mine/fork:dev'] : ['review.yml', 'mine/fork:ci.yml']);
+  }
+  for (const env of [
+    base,
+    { ...base, GITHUB_MERGE_BASE_ALLOW: 'mine/fork:main', GITHUB_WORKFLOW_ALLOW: 'upstream/project:review.yml' },
+    { ...base, GITHUB_REPOS: 'mine/fork,mine/other', GITHUB_MERGE_BASE_ALLOW: 'main', GITHUB_WORKFLOW_ALLOW: 'review.yml' },
+    { ...base, GITHUB_REPOS: 'mine/fork,MINE/other', GITHUB_MERGE_BASE_ALLOW: 'main' },
+  ]) {
+    const warnings: string[] = [];
+    readConfig(env, { ...silentLogger(), warn: (message) => warnings.push(message) });
+    assert.deepEqual(warnings, [], 'empty/scoped lists and a single owner do not warn');
+  }
+});
+
+test('readConfig default startup warnings go only to stderr and name both broad write lists', () => {
+  const env = {
+    GITHUB_TOKEN_FILE: tmpFile('token', 'synthetic-stderr-token'), GITHUB_REPOS: 'mine/fork,upstream/project',
+    GITHUB_MERGE_BASE_ALLOW: 'main', GITHUB_WORKFLOW_ALLOW: 'review.yml',
+  };
+  const child = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e',
+    `import { readConfig } from './src/types.ts'; readConfig(${JSON.stringify(env)});`], { encoding: 'utf8' });
+  assert.equal(child.status, 0, child.stderr);
+  assert.equal(child.stdout, '');
+  assert.equal(child.stderr.trim().split('\n').length, 2);
+  assert.match(child.stderr, /warn GITHUB_MERGE_BASE_ALLOW:/);
+  assert.match(child.stderr, /warn GITHUB_WORKFLOW_ALLOW:/);
+  assert.ok(!child.stderr.includes('synthetic-stderr-token'));
 });

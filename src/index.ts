@@ -209,7 +209,7 @@ async function main(): Promise<void> {
 
   let config: Config;
   try {
-    config = readConfig(process.env);
+    config = readConfig(process.env, log);
   } catch (err) {
     if (err instanceof ConfigError) {
       // Variable names and bounds only — never a secret value.
