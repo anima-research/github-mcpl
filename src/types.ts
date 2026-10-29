@@ -232,6 +232,13 @@ export interface PullRequest {
   mergeable: boolean | null;
   head: GitRef;
   base: GitRef;
+  /**
+   * The repository the head branch lives in: the base repository for a branch
+   * pushed there, a fork otherwise, `null` when the fork was deleted. Optional
+   * because only the merge tools read it (a head branch is only ever deleted
+   * where it is the base repository's own).
+   */
+  headRepo?: RepoRef | null;
   author: EventActor;
   requestedReviewers: string[];
   createdAt: string;
@@ -353,6 +360,94 @@ export interface CreatePullRequestInput {
   title: string;
   body?: string;
   draft?: boolean;
+}
+
+/** A submitted review as `list_reviews` reports it. `pending` is a draft review. */
+export type SubmittedReviewState = 'approved' | 'changes_requested' | 'commented' | 'dismissed' | 'pending';
+
+export interface PullRequestReview {
+  id: number;
+  author: EventActor;
+  state: SubmittedReviewState;
+  body: string;
+  /** The head sha the review was submitted against. */
+  commitId: string;
+  /** Absent on a pending review. */
+  submittedAt: string;
+  html_url: string;
+}
+
+/** The newest reviews (oldest of them first) and the count of all of them. */
+export interface ReviewList {
+  total: number;
+  reviews: PullRequestReview[];
+}
+
+/**
+ * What GitHub knows about a branch that bears on deleting it: a protected
+ * branch, the default branch, or a branch other open pull requests target is
+ * somebody's base, whatever the allow-lists say.
+ */
+export interface BranchFacts {
+  protected: boolean;
+  isDefault: boolean;
+  /** Open pull requests whose base is this branch (counted to 1 or more, not exactly). */
+  openPullsBasedOn: number;
+}
+
+export type MergeMethod = 'merge' | 'squash' | 'rebase';
+
+export interface MergePullRequestInput {
+  method: MergeMethod;
+  /** The head sha the merge is for; GitHub refuses with 409 when the head has moved. */
+  sha: string;
+  /** Commit title (merge and squash only). */
+  title?: string;
+  /** Commit message (merge and squash only). */
+  message?: string;
+}
+
+export interface MergeResult {
+  merged: boolean;
+  /** The merge commit (or the last rebased commit) on the base branch. */
+  sha: string;
+  message: string;
+}
+
+/** One row of `GET /repos/{o}/{r}/actions/runs`. */
+export interface WorkflowRun {
+  id: number;
+  /** The workflow's name, e.g. `Review`. */
+  name: string;
+  /** The workflow file, e.g. `.github/workflows/review.yml`. */
+  path: string;
+  event: string;
+  /** queued | in_progress | completed | waiting | requested | pending */
+  status: string;
+  /** Null until the run completes. */
+  conclusion: string | null;
+  headBranch: string;
+  headSha: string;
+  runAttempt: number;
+  createdAt: string;
+  html_url: string;
+}
+
+export interface ListWorkflowRunsInput {
+  /** A workflow file name (`review.yml`); absent = every workflow. */
+  workflow?: string;
+  headSha?: string;
+  branch?: string;
+  event?: string;
+  limit: number;
+}
+
+export interface DispatchWorkflowInput {
+  /** A workflow file name (`review.yml`), checked against GITHUB_WORKFLOW_ALLOW. */
+  workflow: string;
+  /** The branch whose copy of the workflow runs. */
+  ref: string;
+  inputs: Record<string, string>;
 }
 
 /**
@@ -507,6 +602,29 @@ export interface GitHubApi {
   requestReviewers(pull: ThreadRef, logins: string[]): Promise<void>;
   createPullRequest(repo: RepoRef, input: CreatePullRequestInput): Promise<PullRequest>;
 
+  // ── Reviews (read) ──
+  /**
+   * The newest {@link LIMITS.listEntries} reviews on a pull request, oldest
+   * of them first, and how many there are in all — so a long history drops
+   * its *oldest* reviews, never the newest verdict.
+   */
+  listReviews(pull: ThreadRef): Promise<ReviewList>;
+
+  // ── Merge ──
+  mergePullRequest(pull: ThreadRef, input: MergePullRequestInput): Promise<MergeResult>;
+  /** Merge the base into the head branch; `expectedHeadSha` guards against a moved head. */
+  updatePullRequestBranch(pull: ThreadRef, expectedHeadSha?: string): Promise<void>;
+  /** Delete `refs/heads/<branch>` in `repo`. */
+  deleteBranch(repo: RepoRef, branch: string): Promise<void>;
+  /** What decides whether a merged head branch may be deleted. */
+  branchFacts(repo: RepoRef, branch: string): Promise<BranchFacts>;
+
+  // ── Actions ──
+  listWorkflowRuns(repo: RepoRef, input: ListWorkflowRunsInput): Promise<WorkflowRun[]>;
+  getWorkflowRun(repo: RepoRef, runId: number): Promise<WorkflowRun>;
+  dispatchWorkflow(repo: RepoRef, input: DispatchWorkflowInput): Promise<void>;
+  rerunWorkflowRun(repo: RepoRef, runId: number, failedOnly: boolean): Promise<void>;
+
   // ── Polling fallback (amendment 1) and identity ──
   /** `GET /repos/{o}/{r}/issues?state=all&sort=updated&since=`: issues and PRs. */
   listIssuesSince(repo: RepoRef, since: string): Promise<PollRead<PolledIssue>>;
@@ -538,6 +656,15 @@ export const GITHUB_API_METHODS = [
   'updatePullRequest',
   'requestReviewers',
   'createPullRequest',
+  'listReviews',
+  'mergePullRequest',
+  'updatePullRequestBranch',
+  'deleteBranch',
+  'branchFacts',
+  'listWorkflowRuns',
+  'getWorkflowRun',
+  'dispatchWorkflow',
+  'rerunWorkflowRun',
   'listIssuesSince',
   'listIssueCommentsSince',
   'listReviewCommentsSince',
@@ -582,6 +709,17 @@ export interface ToolContext {
   repos: readonly RepoRef[];
   /** GITHUB_PR_BASE_ALLOW entries, as written; {@link allowedBases} resolves them per repository. */
   prBaseAllow: readonly string[];
+  /**
+   * GITHUB_MERGE_BASE_ALLOW entries, as written, resolved the same way. Absent
+   * or empty means no pull request may be merged at all.
+   */
+  mergeBaseAllow?: readonly string[];
+  /**
+   * GITHUB_WORKFLOW_ALLOW entries, as written: the workflow files the
+   * github.actions tools may dispatch or re-run (`review.yml`, or
+   * `owner/name:review.yml` for one repository). Absent or empty means none.
+   */
+  workflowAllow?: readonly string[];
   logger: Logger;
 }
 
@@ -602,6 +740,8 @@ export const COMMENTS_FEATURE_SET = 'github.comments';
 export const REVIEW_FEATURE_SET = 'github.review';
 export const ISSUES_FEATURE_SET = 'github.issues';
 export const PR_FEATURE_SET = 'github.pr';
+export const MERGE_FEATURE_SET = 'github.merge';
+export const ACTIONS_FEATURE_SET = 'github.actions';
 
 export const FEATURE_SETS = [
   EVENTS_FEATURE_SET,
@@ -610,6 +750,8 @@ export const FEATURE_SETS = [
   REVIEW_FEATURE_SET,
   ISSUES_FEATURE_SET,
   PR_FEATURE_SET,
+  MERGE_FEATURE_SET,
+  ACTIONS_FEATURE_SET,
 ] as const;
 
 export type FeatureSetName = (typeof FEATURE_SETS)[number];
@@ -622,6 +764,7 @@ export const TOOL_LIST_REVIEW_THREADS = 'list_review_threads';
 export const TOOL_LIST_PULL_REQUEST_FILES = 'list_pull_request_files';
 export const TOOL_GET_CHECK_RUNS = 'get_check_runs';
 export const TOOL_SEARCH_ISSUES = 'search_issues';
+export const TOOL_LIST_REVIEWS = 'list_reviews';
 
 /** github.comments */
 export const TOOL_COMMENT = 'comment';
@@ -646,6 +789,15 @@ export const TOOL_CREATE_PULL_REQUEST = 'create_pull_request';
 export const TOOL_EDIT_PULL_REQUEST = 'edit_pull_request';
 export const TOOL_REQUEST_REVIEW = 'request_review';
 
+/** github.merge */
+export const TOOL_MERGE_PULL_REQUEST = 'merge_pull_request';
+export const TOOL_UPDATE_BRANCH = 'update_branch';
+
+/** github.actions */
+export const TOOL_LIST_WORKFLOW_RUNS = 'list_workflow_runs';
+export const TOOL_DISPATCH_WORKFLOW = 'dispatch_workflow';
+export const TOOL_RERUN_WORKFLOW_RUN = 'rerun_workflow_run';
+
 /**
  * Which feature set owns which tool. The server (.9) routes a `tools/call` by
  * this map and refuses a tool whose feature set is not active.
@@ -659,6 +811,7 @@ export const TOOLS_BY_FEATURE_SET: Record<Exclude<FeatureSetName, 'github.events
     TOOL_LIST_PULL_REQUEST_FILES,
     TOOL_GET_CHECK_RUNS,
     TOOL_SEARCH_ISSUES,
+    TOOL_LIST_REVIEWS,
   ],
   [COMMENTS_FEATURE_SET]: [
     TOOL_COMMENT,
@@ -670,6 +823,8 @@ export const TOOLS_BY_FEATURE_SET: Record<Exclude<FeatureSetName, 'github.events
   [REVIEW_FEATURE_SET]: [TOOL_CREATE_REVIEW, TOOL_RESOLVE_THREAD, TOOL_UNRESOLVE_THREAD],
   [ISSUES_FEATURE_SET]: [TOOL_CREATE_ISSUE, TOOL_EDIT_ISSUE, TOOL_CLOSE_ISSUE, TOOL_REOPEN_ISSUE],
   [PR_FEATURE_SET]: [TOOL_CREATE_PULL_REQUEST, TOOL_EDIT_PULL_REQUEST, TOOL_REQUEST_REVIEW],
+  [MERGE_FEATURE_SET]: [TOOL_MERGE_PULL_REQUEST, TOOL_UPDATE_BRANCH],
+  [ACTIONS_FEATURE_SET]: [TOOL_LIST_WORKFLOW_RUNS, TOOL_DISPATCH_WORKFLOW, TOOL_RERUN_WORKFLOW_RUN],
 };
 
 /** Which feature sets can undo what they did since a checkpoint (§8.1). */
@@ -1136,6 +1291,17 @@ export interface Config {
    * retargeted. {@link allowedBases} answers for one repository.
    */
   prBaseAllow: string[];
+  /**
+   * GITHUB_MERGE_BASE_ALLOW, in GITHUB_PR_BASE_ALLOW's format: the bases a
+   * pull request may be merged into. Empty — the default — means no merge.
+   */
+  mergeBaseAllow: string[];
+  /**
+   * GITHUB_WORKFLOW_ALLOW: the workflow files (`review.yml`, or
+   * `owner/name:review.yml`) that may be dispatched or re-run. Empty — the
+   * default — means none.
+   */
+  workflowAllow: string[];
   stateFile: string | null;
   /** GITHUB_BOT_LOGIN. `''` only in contributor mode when unset: startup sets it to the token's own login. */
   botLogin: string;
@@ -1154,6 +1320,8 @@ export const ENV_VARS = [
   'GITHUB_POLL_INTERVAL_MS',
   'GITHUB_REPOS',
   'GITHUB_PR_BASE_ALLOW',
+  'GITHUB_MERGE_BASE_ALLOW',
+  'GITHUB_WORKFLOW_ALLOW',
   'GITHUB_STATE_FILE',
   'GITHUB_BOT_LOGIN',
   'GITHUB_MAINTAINERS',
@@ -1175,9 +1343,11 @@ export class ConfigError extends Error {
 export type Env = Record<string, string | undefined>;
 
 /**
- * The branches a pull request on `repo` may target: every plain entry of
- * GITHUB_PR_BASE_ALLOW plus the `owner/name:branch` entries scoped to this
- * repository. Order and duplicates as written; the caller only asks `includes`.
+ * The entries of a scoped allow-list that apply to `repo`: every plain entry
+ * plus the `owner/name:<value>` entries scoped to this repository. Used for
+ * branches (GITHUB_PR_BASE_ALLOW, GITHUB_MERGE_BASE_ALLOW) and for workflow
+ * files (GITHUB_WORKFLOW_ALLOW). Order and duplicates as written; the caller
+ * only asks `includes`.
  */
 export function allowedBases(repo: RepoRef, entries: readonly string[]): string[] {
   const out: string[] = [];
@@ -1190,6 +1360,15 @@ export function allowedBases(repo: RepoRef, entries: readonly string[]): string[
     }
   }
   return out;
+}
+
+/**
+ * A workflow file name as `.github/workflows/` holds it: `review.yml`. No
+ * directory, no numeric id — the allow-list and the tools name a workflow by
+ * its file, the one name a reader of the repository can check.
+ */
+export function isWorkflowFileName(name: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*\.ya?ml$/.test(name);
 }
 
 function csv(raw: string | undefined): string[] {
@@ -1241,6 +1420,35 @@ function readPort(name: EnvVar, raw: string | undefined, problems: string[]): nu
     return null;
   }
   return n;
+}
+
+/**
+ * A scoped allow-list — of base branches (GITHUB_PR_BASE_ALLOW,
+ * GITHUB_MERGE_BASE_ALLOW) or of workflow files (GITHUB_WORKFLOW_ALLOW):
+ * `<value>` for every repository, `owner/name:<value>` for one. A scoped entry
+ * must parse and must name a repository in GITHUB_REPOS. `noun` names what
+ * the values are, so an error about workflow files does not talk of branches.
+ */
+function readBaseAllow(
+  name: EnvVar,
+  raw: string | undefined,
+  repos: readonly RepoRef[],
+  problems: string[],
+  noun = 'branch',
+): string[] {
+  const entries = csv(raw);
+  for (const entry of entries) {
+    const at = entry.indexOf(':');
+    if (at < 0) continue;
+    const scope = parseRepoSlug(entry.slice(0, at));
+    const branch = entry.slice(at + 1);
+    if (!scope || !branch) {
+      problems.push(`${name}: "${entry}" is neither a ${noun} nor owner/name:${noun}`);
+    } else if (repos.length > 0 && !repoAllowed(scope, repos)) {
+      problems.push(`${name}: "${entry}" names a repository outside GITHUB_REPOS`);
+    }
+  }
+  return entries;
 }
 
 /**
@@ -1399,16 +1607,13 @@ export function readConfig(env: Env = process.env): Config {
     }
   }
 
-  const prBaseAllow = csv(env.GITHUB_PR_BASE_ALLOW);
-  for (const entry of prBaseAllow) {
-    const at = entry.indexOf(':');
-    if (at < 0) continue;
-    const scope = parseRepoSlug(entry.slice(0, at));
-    const branch = entry.slice(at + 1);
-    if (!scope || !branch) {
-      problems.push(`GITHUB_PR_BASE_ALLOW: "${entry}" is neither a branch nor owner/name:branch`);
-    } else if (repos.length > 0 && !repoAllowed(scope, repos)) {
-      problems.push(`GITHUB_PR_BASE_ALLOW: "${entry}" names a repository outside GITHUB_REPOS`);
+  const prBaseAllow = readBaseAllow('GITHUB_PR_BASE_ALLOW', env.GITHUB_PR_BASE_ALLOW, repos, problems);
+  const mergeBaseAllow = readBaseAllow('GITHUB_MERGE_BASE_ALLOW', env.GITHUB_MERGE_BASE_ALLOW, repos, problems);
+  const workflowAllow = readBaseAllow('GITHUB_WORKFLOW_ALLOW', env.GITHUB_WORKFLOW_ALLOW, repos, problems, 'workflow file');
+  for (const entry of workflowAllow) {
+    const file = entry.slice(entry.indexOf(':') + 1);
+    if (file && !isWorkflowFileName(file)) {
+      problems.push(`GITHUB_WORKFLOW_ALLOW: "${entry}" is not a workflow file name such as review.yml`);
     }
   }
 
@@ -1433,6 +1638,8 @@ export function readConfig(env: Env = process.env): Config {
     pollIntervalMs,
     repos,
     prBaseAllow,
+    mergeBaseAllow,
+    workflowAllow,
     stateFile: env.GITHUB_STATE_FILE?.trim() || null,
     botLogin,
     maintainers: csv(env.GITHUB_MAINTAINERS),

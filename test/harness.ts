@@ -23,7 +23,9 @@ import {
 } from '@animalabs/mcpl-core';
 import { GitHubMcplServer, type GitHubServerOptions } from '../src/server.js';
 import { commentsToolModule } from '../src/tools-comments.js';
+import { actionsToolModule } from '../src/tools-actions.js';
 import { issuesToolModule, prToolModule } from '../src/tools-issues-pr.js';
+import { mergeToolModule } from '../src/tools-merge.js';
 import { readToolModule } from '../src/tools-read.js';
 import { reviewToolModule } from '../src/tools-review.js';
 import {
@@ -35,19 +37,27 @@ import {
   type CreateIssueInput,
   type CreatePullRequestInput,
   type CreateReviewInput,
+  type DispatchWorkflowInput,
   type EventActor,
   type GitHubApi,
   type Issue,
   type IssueSearch,
   type IssueSearchHit,
+  type ListWorkflowRunsInput,
+  type MergePullRequestInput,
+  type MergeResult,
   type PolledComment,
   type PolledIssue,
   type PollRead,
   type PullRequest,
   type PullRequestFile,
+  type PullRequestReview,
+  type BranchFacts,
   type RepoRef,
+  type ReviewList,
   type ReviewThread,
   type SubmittedReview,
+  type WorkflowRun,
   type ThreadRef,
   type ToolResult,
   type UpdateIssueInput,
@@ -99,6 +109,22 @@ export class FakeGitHubApi implements GitHubApi {
   private readonly files = new Map<string, PullRequestFile[]>();
   private readonly checks = new Map<string, ChecksSummary>();
   private readonly reviews: SubmittedReview[] = [];
+  private readonly reviewLists = new Map<string, PullRequestReview[]>();
+  private readonly runs = new Map<string, WorkflowRun[]>();
+  /** Branches `deleteBranch` removed, as `owner/name:branch`. */
+  readonly deletedBranches: string[] = [];
+  /** Every `dispatchWorkflow`, in order. */
+  readonly dispatches: Array<{ repo: RepoRef; input: DispatchWorkflowInput }> = [];
+  /** Every `rerunWorkflowRun`, in order. */
+  readonly reruns: Array<{ repo: RepoRef; runId: number; failedOnly: boolean }> = [];
+  /** What the next `mergePullRequest` answers instead of merging, when set (GitHub's `merged: false`). */
+  mergeRefusal: string | null = null;
+  /** What the next `deleteBranch` throws instead, when set (a 422 from a repo that already deleted it). */
+  deleteBranchError: Error | null = null;
+  /** What `branchFacts` answers, by branch name; absent = an ordinary unprotected branch. */
+  readonly branchFactsByName = new Map<string, BranchFacts>();
+  /** A head that moves after the tool read it and before GitHub merges (the 409 race). */
+  moveHeadBeforeMerge: string | null = null;
   private nextNumber = 1;
   private nextId = 1000;
   private lastStamp = 0;
@@ -241,6 +267,42 @@ export class FakeGitHubApi implements GitHubApi {
 
   seedCheckRuns(repo: RepoRef, summary: ChecksSummary): void {
     this.checks.set(`${repoSlug(repo)}@${summary.sha}`, summary);
+  }
+
+  /** The reviews `listReviews` answers for one pull request, oldest first. */
+  seedReviews(pull: ThreadRef, reviews: Array<Partial<PullRequestReview>>): PullRequestReview[] {
+    const list = reviews.map((partial, i) => ({
+      id: partial.id ?? this.nextId++,
+      author: humanActor('human-one'),
+      state: 'commented' as const,
+      body: '',
+      commitId: `head${pull.number}`.padEnd(40, '0'),
+      submittedAt: new Date(Date.parse(T0) + i * 1000).toISOString(),
+      html_url: `https://github.com/${repoSlug(pull.repo)}/pull/${pull.number}#pullrequestreview-${i}`,
+      ...partial,
+    }));
+    this.reviewLists.set(key(pull.repo, pull.number), list);
+    return list;
+  }
+
+  /** The workflow runs of one repository, newest first as GitHub lists them. */
+  seedWorkflowRuns(repo: RepoRef, runs: Array<Partial<WorkflowRun>>): WorkflowRun[] {
+    const list = runs.map((partial) => ({
+      id: partial.id ?? this.nextId++,
+      name: 'CI',
+      path: '.github/workflows/ci.yml',
+      event: 'pull_request',
+      status: 'completed',
+      conclusion: 'success',
+      headBranch: 'feature',
+      headSha: 'f'.repeat(40),
+      runAttempt: 1,
+      createdAt: T0,
+      html_url: `https://github.com/${repoSlug(repo)}/actions/runs/${partial.id ?? 0}`,
+      ...partial,
+    }));
+    this.runs.set(repoSlug(repo), list);
+    return list;
   }
 
   /** The submitted reviews, in order — createReview has no read method. */
@@ -554,6 +616,91 @@ export class FakeGitHubApi implements GitHubApi {
     });
   }
 
+  // ── Reviews, merge, actions ──
+
+  async listReviews(pull: ThreadRef): Promise<ReviewList> {
+    this.record('listReviews', pull);
+    if (!this.pulls.has(key(pull.repo, pull.number))) {
+      throw new Error(`no such pull request: ${key(pull.repo, pull.number)}`);
+    }
+    // GraphQL's `reviews(last: 50)`: the newest, and the count of all.
+    const all = this.reviewLists.get(key(pull.repo, pull.number)) ?? [];
+    return { total: all.length, reviews: all.slice(-LIMITS.listEntries) };
+  }
+
+  async branchFacts(repo: RepoRef, branch: string): Promise<BranchFacts> {
+    this.record('branchFacts', repo, branch);
+    return this.branchFactsByName.get(branch) ?? { protected: false, isDefault: false, openPullsBasedOn: 0 };
+  }
+
+  async mergePullRequest(pull: ThreadRef, input: MergePullRequestInput): Promise<MergeResult> {
+    this.record('mergePullRequest', pull, input);
+    const pr = this.pulls.get(key(pull.repo, pull.number));
+    if (!pr) throw new Error(`no such pull request: ${key(pull.repo, pull.number)}`);
+    if (this.mergeRefusal !== null) {
+      const message = this.mergeRefusal;
+      this.mergeRefusal = null;
+      return { merged: false, sha: '', message };
+    }
+    if (this.moveHeadBeforeMerge !== null) {
+      pr.head = { ...pr.head, sha: this.moveHeadBeforeMerge };
+      this.moveHeadBeforeMerge = null;
+    }
+    if (input.sha !== pr.head.sha) {
+      throw Object.assign(new Error('Head branch was modified. Review and try the merge again.'), { status: 409 });
+    }
+    pr.merged = true;
+    pr.state = 'closed';
+    pr.updatedAt = new Date().toISOString();
+    return { merged: true, sha: 'merge'.padEnd(40, '0'), message: 'Pull Request successfully merged' };
+  }
+
+  async updatePullRequestBranch(pull: ThreadRef, expectedHeadSha?: string): Promise<void> {
+    this.record('updatePullRequestBranch', pull, expectedHeadSha);
+    const pr = this.pulls.get(key(pull.repo, pull.number));
+    if (!pr) throw new Error(`no such pull request: ${key(pull.repo, pull.number)}`);
+    if (expectedHeadSha !== undefined && expectedHeadSha !== pr.head.sha) {
+      throw Object.assign(new Error('expected head sha didn’t match current head ref.'), { status: 422 });
+    }
+  }
+
+  async deleteBranch(repo: RepoRef, branch: string): Promise<void> {
+    this.record('deleteBranch', repo, branch);
+    if (this.deleteBranchError !== null) {
+      const err = this.deleteBranchError;
+      this.deleteBranchError = null;
+      throw err;
+    }
+    this.deletedBranches.push(`${repoSlug(repo)}:${branch}`);
+  }
+
+  async listWorkflowRuns(repo: RepoRef, input: ListWorkflowRunsInput): Promise<WorkflowRun[]> {
+    this.record('listWorkflowRuns', repo, input);
+    return (this.runs.get(repoSlug(repo)) ?? [])
+      .filter((r) => input.headSha === undefined || r.headSha === input.headSha)
+      .filter((r) => input.branch === undefined || r.headBranch === input.branch)
+      .filter((r) => input.event === undefined || r.event === input.event)
+      .filter((r) => input.workflow === undefined || r.path.endsWith(`/${input.workflow}`))
+      .slice(0, input.limit);
+  }
+
+  async getWorkflowRun(repo: RepoRef, runId: number): Promise<WorkflowRun> {
+    this.record('getWorkflowRun', repo, runId);
+    const run = (this.runs.get(repoSlug(repo)) ?? []).find((r) => r.id === runId);
+    if (!run) throw Object.assign(new Error('Not Found'), { status: 404 });
+    return run;
+  }
+
+  async dispatchWorkflow(repo: RepoRef, input: DispatchWorkflowInput): Promise<void> {
+    this.record('dispatchWorkflow', repo, input);
+    this.dispatches.push({ repo, input });
+  }
+
+  async rerunWorkflowRun(repo: RepoRef, runId: number, failedOnly: boolean): Promise<void> {
+    this.record('rerunWorkflowRun', repo, runId, failedOnly);
+    this.reruns.push({ repo, runId, failedOnly });
+  }
+
   // ── Polling fallback (amendment 1) and identity ──
 
   private inRepo(repo: RepoRef, threadKey: string): boolean {
@@ -634,7 +781,7 @@ export interface HarnessOptions extends GitHubServerOptions {
   /** What the host answers to push/event (default true). */
   pushAccepted?: boolean;
   /**
-   * Register the five tool modules, as `src/index.ts` does. Default true; a
+   * Register the seven tool modules, as `src/index.ts` does. Default true; a
    * test that wants the bare server (the .1 smoke test) passes false.
    */
   tools?: boolean;
@@ -678,16 +825,20 @@ export function harness(opts: HarnessOptions = {}): Harness {
     repos: opts.repos ?? [TEST_REPO],
     maintainers: opts.maintainers,
     prBaseAllow: opts.prBaseAllow,
+    mergeBaseAllow: opts.mergeBaseAllow,
+    workflowAllow: opts.workflowAllow,
     state: opts.state,
     logger: opts.logger,
   });
   if (opts.tools !== false) {
-    // The same five src/index.ts registers; github.events carries no tools.
+    // The same seven src/index.ts registers; github.events carries no tools.
     server.register(readToolModule);
     server.register(commentsToolModule);
     server.register(reviewToolModule);
     server.register(issuesToolModule);
     server.register(prToolModule);
+    server.register(mergeToolModule);
+    server.register(actionsToolModule);
   }
 
   const hostSaw: JsonRpcRequest[] = [];
