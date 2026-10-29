@@ -35,6 +35,10 @@ import {
   summarizeChecks,
 } from '../src/github-adapter.js';
 import { Poller } from '../src/poller.js';
+import { mergeToolModule } from '../src/tools-merge.js';
+import { actionsToolModule } from '../src/tools-actions.js';
+import { readToolModule } from '../src/tools-read.js';
+import { reviewToolModule } from '../src/tools-review.js';
 import { GithubState } from '../src/state.js';
 import {
   readConfig,
@@ -44,6 +48,9 @@ import {
   type Logger,
   type RepoRef,
   type ThreadRef,
+  type ToolContext,
+  type ToolModule,
+  type ToolResult,
 } from '../src/types.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3042,4 +3049,221 @@ test('sparse review walk: an all-empty last=25 listing still hits the read cap',
   });
   await assert.rejects(() => r.adapter.listReviewsSince(PULL, '2026-10-14T00:00:00Z'), ReadCapError);
   assert.equal(r.fake.for('GET /repos/anima-research/rayforce/pulls/12/reviews').length, 22, 'page one plus twenty pages and a boundary probe');
+});
+
+// PR #11/#14 through the production tools and HTTP adapter, in both auth modes.
+// The local server is the only network peer; credentials are test sentinels.
+const LAYER_REPO_PATH = '/repos/anima-research/rayforce';
+const LAYER_RUN = {
+  id: 9001, name: 'Review', path: '.github/workflows/review.yml',
+  event: 'workflow_dispatch', status: 'completed', conclusion: 'success',
+  head_branch: 'dev', head_sha: HEAD_SHA, run_attempt: 1,
+};
+
+function layerRoutes(fake: FakeGitHub): void {
+  const p = LAYER_REPO_PATH;
+  defaultRoutes(fake);
+  fake
+    .on(`GET ${p}/pulls/12`, { body: {
+      ...PULL_PAYLOAD,
+      head: { ref: 'feature', sha: HEAD_SHA, repo: { owner: { login: REPO.owner }, name: REPO.name } },
+    } })
+    .on(`PUT ${p}/pulls/12/merge`, { body: { merged: true, sha: HEAD_SHA, message: 'merged' } })
+    .on(`PUT ${p}/pulls/12/update-branch`, { status: 202, body: {} })
+    .on(`GET ${p}/branches/feature`, { body: { protected: false } })
+    .on(`GET ${p}`, { body: { default_branch: 'dev' } })
+    .on(`GET ${p}/pulls`, { body: [] })
+    .on(`DELETE ${p}/git/refs/heads/feature`, { status: 204 })
+    .on(`DELETE ${p}/git/refs/heads%2Ffeature`, { status: 204 })
+    .on(`GET ${p}/actions/runs`, { body: { workflow_runs: [LAYER_RUN] } })
+    .on(`GET ${p}/actions/workflows/review.yml/runs`, { body: { workflow_runs: [LAYER_RUN] } })
+    .on(`GET ${p}/actions/runs/9001`, { body: LAYER_RUN })
+    .on(`POST ${p}/actions/workflows/review.yml/dispatches`, { status: 204 })
+    .on(`POST ${p}/actions/runs/9001/rerun`, { status: 201, body: {} })
+    .on(`POST ${p}/actions/runs/9001/rerun-failed-jobs`, { status: 201, body: {} })
+    .on('POST /graphql', (req) => {
+      const query = String(req.body.query);
+      if (query.includes('mutation')) return { body: { data: { resolveReviewThread: { thread: { id: 'PRRT_test' } } } } };
+      return { body: { data: { repository: { pullRequest: {
+        reviews: { totalCount: 1, nodes: [{ databaseId: 1, state: 'APPROVED', author: { login: 'reviewer', __typename: 'User' }, commit: { oid: HEAD_SHA } }] },
+        reviewThreads: { nodes: [{ id: 'PRRT_test', path: 'a.ts', line: 1, diffSide: 'RIGHT', isResolved: false, comments: { nodes: [] } }] },
+      } } } } };
+    });
+}
+
+function layerContext(api: GitHubAdapter, cfg: Config): ToolContext {
+  return {
+    api, state: GithubState.empty(), botLogin: cfg.botLogin, repos: cfg.repos,
+    prBaseAllow: cfg.prBaseAllow, mergeBaseAllow: cfg.mergeBaseAllow,
+    workflowAllow: cfg.workflowAllow, logger: silentLogger(),
+  };
+}
+
+function layerText(result: ToolResult): string {
+  return result.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+}
+
+function assertUserTransport(r: { fake: FakeGitHub; logs: string[] }): void {
+  assert.ok(r.fake.calls.length > 0);
+  for (const call of r.fake.calls) {
+    assert.equal(call.headers.authorization, `token ${USER_TOKEN}`);
+    assert.ok(!call.path.includes('/app') && !call.path.includes('/installation'), call.path);
+  }
+  assert.ok(!r.logs.join('\n').includes(USER_TOKEN));
+}
+
+const LAYER_CALLS: { module: ToolModule; name: string; args: Record<string, unknown>; route: string }[] = [
+  { module: mergeToolModule, name: 'merge_pull_request', args: { number: 12, sha: HEAD_SHA.slice(0, 12) }, route: `PUT ${LAYER_REPO_PATH}/pulls/12/merge` },
+  { module: mergeToolModule, name: 'update_branch', args: { number: 12, sha: HEAD_SHA.slice(0, 12) }, route: `PUT ${LAYER_REPO_PATH}/pulls/12/update-branch` },
+  { module: readToolModule, name: 'list_reviews', args: { number: 12 }, route: 'POST /graphql' },
+  { module: reviewToolModule, name: 'resolve_thread', args: { number: 12, threadId: 'PRRT_test' }, route: 'POST /graphql' },
+  { module: reviewToolModule, name: 'unresolve_thread', args: { number: 12, threadId: 'PRRT_test' }, route: 'POST /graphql' },
+  { module: actionsToolModule, name: 'list_workflow_runs', args: { number: 12 }, route: `GET ${LAYER_REPO_PATH}/actions/runs` },
+  { module: actionsToolModule, name: 'dispatch_workflow', args: { workflow: 'review.yml', ref: 'dev', inputs: { pr: '12' } }, route: `POST ${LAYER_REPO_PATH}/actions/workflows/review.yml/dispatches` },
+  { module: actionsToolModule, name: 'rerun_workflow_run', args: { run_id: 9001 }, route: `POST ${LAYER_REPO_PATH}/actions/runs/9001/rerun` },
+];
+const LAYER_ALLOW = { GITHUB_PR_BASE_ALLOW: 'dev', GITHUB_MERGE_BASE_ALLOW: 'anima-research/rayforce:dev', GITHUB_WORKFLOW_ALLOW: 'anima-research/rayforce:review.yml' };
+
+for (const mode of ['app', 'token'] as const) {
+  test(`${mode}: layer tools use the real adapter, including full sha guards and workflow payloads`, async () => {
+    const r = mode === 'token' ? await tokenRig(layerRoutes) : await rig();
+    if (mode === 'app') layerRoutes(r.fake);
+    const cfg = mode === 'token' ? tokenConfig(LAYER_ALLOW) : config(LAYER_ALLOW);
+    const ctx = layerContext(r.adapter, cfg);
+    for (const entry of LAYER_CALLS) {
+      const out = await entry.module.call(entry.name, entry.args, ctx);
+      assert.equal(out.isError, undefined, `${entry.name}: ${layerText(out)}`);
+      assert.ok(r.fake.for(entry.route).length > 0, entry.route);
+      assert.ok(!layerText(out).includes(mode === 'token' ? USER_TOKEN : TOKEN));
+    }
+    assert.deepEqual(r.fake.for(`PUT ${LAYER_REPO_PATH}/pulls/12/merge`)[0].body, { merge_method: 'merge', sha: HEAD_SHA });
+    assert.deepEqual(r.fake.for(`PUT ${LAYER_REPO_PATH}/pulls/12/update-branch`)[0].body, { expected_head_sha: HEAD_SHA });
+    assert.deepEqual(r.fake.for(`POST ${LAYER_REPO_PATH}/actions/workflows/review.yml/dispatches`)[0].body, { ref: 'dev', inputs: { pr: '12' } });
+    const gql = r.fake.for('POST /graphql');
+    assert.ok(gql.some((c) => String(c.body.query).includes('resolveReviewThread(input:')));
+    assert.ok(gql.some((c) => String(c.body.query).includes('unresolveReviewThread(input:')));
+    assert.ok(gql.some((c) => String(c.body.query).includes('reviews(last:')));
+    for (const [module, name, args] of [
+      [mergeToolModule, 'merge_pull_request', { number: 12, delete_branch: true }],
+      [actionsToolModule, 'list_workflow_runs', { workflow: 'review.yml' }],
+      [actionsToolModule, 'rerun_workflow_run', { run_id: 9001, failed_only: true }],
+    ] as const) {
+      const out = await module.call(name, args, ctx);
+      assert.equal(out.isError, undefined, layerText(out));
+    }
+    assert.ok(r.fake.calls.some((c) => c.method === 'DELETE' && decodeURIComponent(c.path).endsWith('/heads/feature')));
+    assert.equal(r.fake.for(`POST ${LAYER_REPO_PATH}/actions/runs/9001/rerun-failed-jobs`).length, 1);
+    if (mode === 'token') assertUserTransport(r);
+  });
+
+  test(`${mode}: merge/workflow allow-lists default empty and scoped mismatches refuse writes`, async () => {
+    const r = mode === 'token' ? await tokenRig(layerRoutes) : await rig();
+    if (mode === 'app') layerRoutes(r.fake);
+    const cfg = mode === 'token' ? tokenConfig() : config();
+    assert.deepEqual(cfg.mergeBaseAllow, []);
+    assert.deepEqual(cfg.workflowAllow, []);
+    for (const overrides of [
+      {},
+      { mergeBaseAllow: ['elsewhere/project:dev'], workflowAllow: ['elsewhere/project:review.yml'] },
+    ]) {
+      const ctx = { ...layerContext(r.adapter, cfg), ...overrides };
+      for (const entry of LAYER_CALLS.filter((e) => ['merge_pull_request', 'update_branch', 'dispatch_workflow', 'rerun_workflow_run'].includes(e.name))) {
+        const out = await entry.module.call(entry.name, entry.args, ctx);
+        assert.equal(out.isError, true, entry.name);
+        assert.match(layerText(out), /GITHUB_(MERGE_BASE|WORKFLOW)_ALLOW/);
+        assert.equal(r.fake.for(entry.route).length, 0, 'no write after refusal');
+      }
+    }
+    if (mode === 'token') assertUserTransport(r);
+  });
+
+  test(`${mode}: every layer tool rejects an outside repository before the adapter is called`, async () => {
+    const r = mode === 'token' ? await tokenRig(layerRoutes) : await rig();
+    const ctx = layerContext(r.adapter, mode === 'token' ? tokenConfig(LAYER_ALLOW) : config(LAYER_ALLOW));
+    for (const entry of LAYER_CALLS) {
+      const out = await entry.module.call(entry.name, { ...entry.args, repo: 'outside/secret' }, ctx);
+      assert.equal(out.isError, true, entry.name);
+      assert.match(layerText(out), /GITHUB_REPOS/);
+    }
+    assert.equal(r.fake.calls.length, 0);
+  });
+
+  test(`${mode}: #14 refuses base heads, fork heads and unknown branch facts before updating`, async () => {
+    const r = mode === 'token' ? await tokenRig(layerRoutes) : await rig();
+    const cfg = mode === 'token' ? tokenConfig(LAYER_ALLOW) : config(LAYER_ALLOW);
+    const ctx = layerContext(r.adapter, cfg);
+    const p = LAYER_REPO_PATH;
+    const cases: { setup: () => void; reason: RegExp }[] = [
+      { setup: () => { ctx.prBaseAllow = ['feature']; }, reason: /base branch here/ },
+      { setup: () => { ctx.mergeBaseAllow = ['dev', 'feature']; }, reason: /base branch here/ },
+      { setup: () => { r.fake.on(`GET ${p}/branches/feature`, { body: { protected: true } }); }, reason: /protected on GitHub/ },
+      { setup: () => { r.fake.on(`GET ${p}`, { body: { default_branch: 'feature' } }); }, reason: /default branch/ },
+      { setup: () => { r.fake.on(`GET ${p}/pulls`, { body: [{ number: 99 }] }); }, reason: /base of another open pull request/ },
+      { setup: () => { r.fake.on(`GET ${p}/branches/feature`, { status: 403, body: { message: 'Forbidden' } }); }, reason: /nothing was written/ },
+      ...[null, { owner: { login: 'a-human' }, name: REPO.name }].map((repo) => ({
+        setup: () => { r.fake.on(`GET ${p}/pulls/12`, { body: { ...PULL_PAYLOAD, head: { ref: 'feature', sha: HEAD_SHA, repo } } }); },
+        reason: repo === null ? /no longer knows the head repository/ : /pull request's own repository/,
+      })),
+    ];
+    for (const entry of cases) {
+      layerRoutes(r.fake);
+      ctx.prBaseAllow = cfg.prBaseAllow;
+      ctx.mergeBaseAllow = cfg.mergeBaseAllow;
+      entry.setup();
+      const out = await mergeToolModule.call('update_branch', { number: 12, sha: HEAD_SHA }, ctx);
+      assert.equal(out.isError, true, layerText(out));
+      assert.match(layerText(out), entry.reason);
+      assert.equal(r.fake.for(`PUT ${p}/pulls/12/update-branch`).length, 0);
+    }
+    if (mode === 'token') assertUserTransport(r);
+  });
+
+  test(`${mode}: moved heads are refused locally and server-side sha races surface cleanly`, async () => {
+    const r = mode === 'token' ? await tokenRig(layerRoutes) : await rig();
+    if (mode === 'app') layerRoutes(r.fake);
+    const ctx = layerContext(r.adapter, mode === 'token' ? tokenConfig(LAYER_ALLOW) : config(LAYER_ALLOW));
+    for (const entry of LAYER_CALLS.slice(0, 2)) {
+      const out = await entry.module.call(entry.name, { ...entry.args, sha: 'deadbeef' }, ctx);
+      assert.equal(out.isError, true);
+      assert.match(layerText(out), /moved since it was read/);
+      assert.equal(r.fake.for(entry.route).length, 0);
+      r.fake.on(entry.route, { status: entry.name === 'merge_pull_request' ? 409 : 422, body: { message: 'Head sha changed' } });
+      const race = await entry.module.call(entry.name, entry.args, ctx);
+      assert.equal(race.isError, true);
+      assert.match(layerText(race), /Head sha changed/);
+      assert.equal(r.fake.for(entry.route).length, 1);
+    }
+    if (mode === 'token') assertUserTransport(r);
+  });
+}
+
+for (const status of [401, 403]) {
+  test(`contributor layer tools surface HTTP ${status} without refreshing or leaking the user token`, async () => {
+    for (const entry of LAYER_CALLS) {
+      const r = await tokenRig(layerRoutes);
+      r.fake.on(entry.route, { status, body: { message: `Credential refused: ${USER_TOKEN}` } });
+      const out = await entry.module.call(entry.name, entry.args, layerContext(r.adapter, tokenConfig(LAYER_ALLOW)));
+      assert.equal(out.isError, true, entry.name);
+      assert.match(layerText(out), new RegExp(String(status)));
+      assert.ok(!layerText(out).includes(USER_TOKEN));
+      assert.equal(r.fake.for(entry.route).length, 1, 'no retry or installation fallback');
+      assertUserTransport(r);
+    }
+  });
+}
+
+test('contributor thread mutations surface GraphQL permission denials after membership is established', async () => {
+  const r = await tokenRig(layerRoutes);
+  const ctx = layerContext(r.adapter, tokenConfig(LAYER_ALLOW));
+  r.fake.on('POST /graphql', (req) => String(req.body.query).includes('mutation')
+    ? { body: { errors: [{ type: 'FORBIDDEN', message: `Permission denied: ${USER_TOKEN}` }] } }
+    : { body: { data: { repository: { pullRequest: { reviewThreads: { nodes: [{ id: 'PRRT_test', comments: { nodes: [] } }] } } } } } });
+  for (const name of ['resolve_thread', 'unresolve_thread']) {
+    const out = await reviewToolModule.call(name, { number: 12, threadId: 'PRRT_test' }, ctx);
+    assert.equal(out.isError, true);
+    assert.match(layerText(out), /Permission denied/);
+    assert.ok(!layerText(out).includes(USER_TOKEN));
+  }
+  assert.equal(r.fake.for('POST /graphql').length, 4, 'one membership read and one mutation per tool');
+  assertUserTransport(r);
 });
