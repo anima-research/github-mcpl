@@ -7,6 +7,7 @@
  */
 
 import { strict as assert } from 'node:assert';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -176,25 +177,32 @@ test('a flushed state reloads with its lineage and its rollback reach', async ()
   assert.deepEqual(plan.edited.map((e) => e.previousBody), ['before']);
 });
 
-test('a crash between the write and the rename never replaces the state', async () => {
+test('a crash between the write and the rename never replaces the state', () => {
   const file = tempFile();
-  const state = GithubState.load(file);
-  const cp = state.createCheckpoint();
-  state.recordCreatedComment({ repo: REPO, commentId: 11, review: false });
-  await state.flush();
-  const good = readFileSync(file, 'utf8');
+  // node:fs/promises' named exports, as state.ts imports them, follow a change
+  // to its CommonJS exports only once syncBuiltinESMExports() has run.
+  const firstFlush = `${file}.first-flush`;
+  const crash = `
+    import { copyFileSync } from 'node:fs';
+    import { createRequire, syncBuiltinESMExports } from 'node:module';
+    import { GithubState } from ${JSON.stringify(new URL('../src/state.ts', import.meta.url).href)};
+    const state = GithubState.load(${JSON.stringify(file)});
+    state.createCheckpoint();
+    state.recordCreatedComment({ repo: ${JSON.stringify(REPO)}, commentId: 11, review: false });
+    await state.flush();
+    copyFileSync(${JSON.stringify(file)}, ${JSON.stringify(firstFlush)});
+    createRequire(import.meta.url)('node:fs/promises').rename = () => process.exit(7);
+    syncBuiltinESMExports();
+    state.recordCreatedComment({ repo: ${JSON.stringify(REPO)}, commentId: 12, review: false });
+    await state.flush();
+  `;
+  const r = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', crash], { encoding: 'utf8' });
+  assert.equal(r.status, 7, `the second flush should have stopped at its rename:\n${r.stderr}`);
 
-  // What a crash mid-flush leaves behind: a truncated temp file beside an
-  // untouched state file. `flush` renames only a fully written temp file, so
-  // the half-written one is not the state and is never read as the state.
-  const truncated = `${file}.tmp-99999-deadbeef`;
-  writeFileSync(truncated, '{"version":1,"checkpoints":[{"id":"chk_half');
-
-  assert.equal(readFileSync(file, 'utf8'), good);
+  assert.equal(readFileSync(file, 'utf8'), readFileSync(firstFlush, 'utf8'), 'the state file is the first flush\'s, byte for byte');
   const reloaded = GithubState.load(file);
-  assert.deepEqual(reloaded.lineage().map((c) => c.id), [cp.id]);
-  assert.deepEqual(reloaded.snapshot().created[cp.id].map((c) => c.commentId), [11]);
-  assert.deepEqual(strayTempFiles(file), [`state.json.tmp-99999-deadbeef`]);
+  const [cp] = reloaded.lineage();
+  assert.deepEqual(reloaded.rollback(cp.id)?.created.map((c) => c.commentId), [11]);
 });
 
 test('concurrent flushes serialize and the file always parses', async () => {
@@ -262,7 +270,7 @@ test('the poll dedup ring remembers the last 2000 keys and no more', () => {
   assert.equal(state.seenPollKey(`issue:${POLL_DEDUP_RING - 1}:t`), true);
 });
 
-test('the polled heads are bounded, survive a flush, and tolerate an older file (amendment 2a)', async () => {
+test('the polled heads are bounded, oldest out first, and re-recording a head refreshes its place', async () => {
   const state = GithubState.empty();
   assert.equal(state.polledHead('github:anima-research/rayforce#58'), null);
   state.setPolledHead('github:anima-research/rayforce#58', 'a'.repeat(40));

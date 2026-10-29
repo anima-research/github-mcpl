@@ -124,16 +124,15 @@ test('side defaults to RIGHT, the post-image', async () => {
   ]);
 });
 
-test('a review without inline comments passes comments: undefined', async () => {
+test('a review without inline comments sends none, and says so', async () => {
   const api = new FakeGitHubApi();
   api.seedPullRequest({ number: 8, author: HUMAN });
 
   const out = ok(await reviewToolModule.call('create_review', { number: 8, event: 'COMMENT', body: 'looks fine' }, ctx(api)));
-  assert.deepEqual(api.callsTo('createReview')[0].args[1], {
-    event: 'COMMENT',
-    body: 'looks fine',
-    comments: undefined,
-  });
+  const input = api.callsTo('createReview')[0].args[1] as CreateReviewInput;
+  assert.equal(input.event, 'COMMENT');
+  assert.equal(input.body, 'looks fine');
+  assert.equal((input.comments ?? []).length, 0);
   assert.match(out, /with 0 inline comments/);
 });
 

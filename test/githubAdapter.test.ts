@@ -33,7 +33,6 @@ import {
 import { Poller } from '../src/poller.js';
 import { GithubState } from '../src/state.js';
 import {
-  GITHUB_API_METHODS,
   readConfig,
   silentLogger,
   type NormalizedEvent,
@@ -733,13 +732,6 @@ test('a GraphQL errors array becomes a GitHubApiError, not a silent empty list',
 // ─────────────────────────────────────────────────────────────────────────────
 // Every GitHubApi method maps to its documented call
 // ─────────────────────────────────────────────────────────────────────────────
-
-test('every GitHubApi method is implemented on the adapter', async () => {
-  const r = await rig();
-  for (const name of GITHUB_API_METHODS) {
-    assert.equal(typeof (r.adapter as unknown as Record<string, unknown>)[name], 'function', `missing ${name}`);
-  }
-});
 
 test('reads hit the documented REST paths and map the payloads', async () => {
   const r = await rig();

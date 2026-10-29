@@ -39,6 +39,9 @@ jobs:
       - name: Type-check
         run: npm run typecheck
 
+      - name: Install agent-framework for the wake-policy tests, unsaved
+        run: npm install --no-save @animalabs/agent-framework
+
       - name: Test
         run: npm test
 

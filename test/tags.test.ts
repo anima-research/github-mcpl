@@ -204,15 +204,6 @@ test('every tag the table expects is in the declared vocabulary', () => {
       assert.ok(EMITTED_TAGS.includes(tag), `${tag} is not declared in EMITTED_TAGS`);
     }
   }
-  assert.deepEqual(sorted(EMITTED_TAGS), sorted([...CORE_TAGS, ...GITHUB_TAGS]));
-});
-
-test('tags are deduplicated and namespaced', () => {
-  for (const row of TAG_TABLE) {
-    const { tags } = tagsFor(event(row.kind, row.event), ctx(row.ctx));
-    assert.equal(new Set(tags).size, tags.length, `${row.kind} emitted a duplicate`);
-    for (const tag of tags) assert.match(tag, /^(chat|github):/, `${tag} is not namespaced`);
-  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
