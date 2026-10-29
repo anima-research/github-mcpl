@@ -3,8 +3,10 @@
 An MCPL connector for GitHub. A repository's issues, pull requests,
 comments, reviews and check results reach an agent as **push events** and as
 **channels**, and the agent acts back through **tools** grouped into feature
-sets the host grants (and can roll back). One server serves one repository
-or several of one owner; one process per owner.
+sets the host grants (and can roll back). With the App, one server serves
+one repository or several of one owner, so one process per owner; with a
+user token ([contributor mode](#contributor-mode-user-token)), one serves
+the repositories it works in, whoever owns them.
 
 - **Wake, not poll-and-hope.** An issue, a comment, a pull request, a review,
   an inline review comment or a failing check suite becomes one normalized
@@ -18,15 +20,18 @@ or several of one owner; one process per owner.
   rollback deletes the comments created after the checkpoint and restores the
   bodies of the ones edited after it. Nothing GitHub cannot undo is
   checkpointed, and nothing is granted that the host did not grant.
-- **No merge, ever.** Not in v1, not behind a flag. The base branch of any
-  pull request the server opens or retargets is checked against an allow-list.
+- **Merge only where the operator said so.** Merging is its own feature set,
+  `github.merge`, and it merges only into the bases `GITHUB_MERGE_BASE_ALLOW`
+  names — empty by default, so a deployment that never set it cannot merge
+  anything, whatever a host grants. The base of any pull request the server
+  opens or retargets is checked against `GITHUB_PR_BASE_ALLOW` the same way.
 
 Built on [`@animalabs/mcpl-core`](../mcpl-core-ts); sibling of
 [slack-mcpl](../slack-mcpl) and [telegram-mcpl](../telegram-mcpl).
 
 > **Status: v1, run end to end against a live GitHub App.** The server answers a
 > host's handshake in MCPL or in plain MCP, applies the grant it is given
-> (absence is denial), serves the twenty-two tools of the five tool feature
+> (absence is denial), serves the twenty-eight tools of the seven tool feature
 > sets, registers a channel per thread and publishes into one, checkpoints
 > every comment write and rolls it back, and turns a webhook delivery or a
 > poll pass into a `push/event` and a `channels/incoming` with tags and wake
@@ -47,10 +52,10 @@ does and does not protect.
 
 Everything after this runs commands out of this repository — step 3 uses a
 script from it before GitHub has even created the App — so the checkout comes
-first. Node 22 or newer (nvm is fine), and one clone:
+first. Node 22.12.0 or newer (nvm is fine), and one clone:
 
 ```sh
-node --version                                      # v22 or newer
+node --version                                      # v22.12.0 or newer
 git clone <this repository> ~/github-mcpl
 cd ~/github-mcpl
 ```
@@ -70,7 +75,7 @@ install -d -m 700 ~/.config/github-mcpl
 ### 3. Create the GitHub App from the manifest
 
 [`app-manifest.json`](app-manifest.json) is a GitHub App manifest: it names
-the five permissions the tools need and the eight events the ingress
+the five permissions the default tools need and the eight events the ingress
 understands, so you do not have to tick 40 checkboxes correctly. GitHub's
 manifest flow is three steps — post the manifest, catch the code GitHub sends
 back, exchange the code for the App's credentials — and the third is the one
@@ -241,6 +246,8 @@ told where Node is instead of looking.
 | `GITHUB_POLL_INTERVAL_MS` | no | `0` (off) | Polling fallback: issues and PRs, issue comments and review comments updated since each list's cursor, plus the checks on the heads of the open PRs seen. `0` is off; a non-zero value below `60000` is refused. Partial — it cannot see a submitted review, a review request or a push ([what polling misses](docs/deploy.md#option-3--polling-only-no-webhook-at-all)) — and it is not meant to run alongside the webhook. |
 | `GITHUB_REPOS` | yes | — | Comma-separated `owner/name` allow-list; a write anywhere else is refused by name. Several entries must share one owner (one App installation, one token); a second owner is a second server process. With several, every tool call names its repository. |
 | `GITHUB_PR_BASE_ALLOW` | no | empty = no PR target allowed | Branches a pull request may target or be retargeted to. A plain `branch` applies to every repository, `owner/name:branch` to that one: `anima-research/rayforce:dev,main`. |
+| `GITHUB_MERGE_BASE_ALLOW` | no | empty = no merge | Branches `merge_pull_request` may merge into, in the same format. Naming a branch here is what turns merging on; granting `github.merge` alone does not. |
+| `GITHUB_WORKFLOW_ALLOW` | no | empty = no dispatch or re-run | Workflow files (`review.yml`, or `owner/name:review.yml` for one repository) that `dispatch_workflow` and `rerun_workflow_run` may start. Never name a release or publish workflow you would not let the agent run. |
 | `GITHUB_STATE_FILE` | no | unset = in-memory only | Durable JSON: checkpoint lineage, rollback bookkeeping, and the polling state: a cursor for each repository and list (`pollCursors`), `lastPollAt` where a list with none starts, and the rows announced as new (`pollNew`). A list with a cursor of its own starts from it, not from `lastPollAt`. |
 | `GITHUB_BOT_LOGIN` | yes | — | The App's bot login, e.g. `rayforce-clone[bot]`. From-self and mention detection depend on it. |
 | `GITHUB_MAINTAINERS` | no | empty | Comma-separated logins marked `isMaintainer` in metadata and tagged `github:actor=maintainer`. |
@@ -291,7 +298,7 @@ exception next, and the wake rules last:
 | --- | --- | --- | --- |
 | 1 | `github-self` | `fromSelf` | `skip` — otherwise the agent answers itself |
 | 2 | `github-machine-noise` | `github:push`, `github:ci=success` | `skip` |
-| 3 | `github-other-bots` | `chat:from-bot`, without `chat:mention` or `github:ci=failure` | `skip` — dependabot does not get a turn |
+| 3 | `github-other-bots` | `chat:from-bot`, without `chat:mention`, `github:pr=review_requested` or `github:ci=failure` | `skip` — dependabot does not get a turn, though a review asked of the agent on its pull request does |
 | 4 | `github-ci-failure-own-thread` | `github:ci=failure` **and** `isOwnThread` | `always` — the exception rules 2 and 3 leave room for |
 | 5 | `github-direct-address` | `mentioned`, `isReviewRequested`, `isOwnThread`, `isReplyToSelf` | `always` |
 | 6 | `github-new-work` (maintainer clone only) | `github:issue=opened`, `github:pr=opened` | `debounce: 60000` — one wake once the burst settles |
@@ -302,6 +309,75 @@ exception next, and the wake rules last:
 own pull request is skipped, a broken one wakes it, a bot's pull request
 neither wakes nor debounces, a human mention wakes it, and no rule is left
 unreachable by an earlier one.
+
+## Contributor mode (user token)
+
+For a resident that contributes to repositories it **cannot install the App on**, such as someone else's upstream: it wakes on reviews, comments and state changes on its own pull requests and on the threads it takes part in.
+
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `GITHUB_TOKEN_FILE` | yes (instead of the App variables) | — | Path to a personal access token (classic), mode 600. See **The token** below. |
+| `GITHUB_BOT_LOGIN` | no | the token's login | The token owner's login, spelled as GitHub spells it (no `[bot]`). From-self and mention detection use it. Unset, the server takes it from `GET /user` at start, and stops when GitHub doesn't answer. Set, it is checked against the token's own login when GitHub answers, and the server stops if they differ; when GitHub doesn't answer, it starts unchecked and logs a warning. |
+| `GITHUB_REPOS` | yes | — | The repositories the agent works in, and the write allow-list. In this mode it may span several owners. Notifications from any other repository are dropped. Spell each as GitHub does: at start the server checks each against GitHub and stops on a different spelling, or a repository the token can't see. |
+| `GITHUB_POLL_INTERVAL_MS` | no | `60000` | Notifications poll interval; values below `60000` are refused. GitHub's `X-Poll-Interval` is honoured when it asks for longer. |
+| `GITHUB_STATE_FILE` | recommended | — | Keeps the notifications watermark, when GitHub last answered, each thread's cursor, the threads to read again and the dedup ring across restarts. Without it, every start begins as a first start does (below): activity from a longer downtime isn't delivered, and some from before the start can arrive twice. |
+
+Setting both `GITHUB_TOKEN_FILE` and the App variables is a startup error, and so is `GITHUB_APP_INSTALLATION_ID`. `GITHUB_WEBHOOK_PORT` is refused in this mode: GitHub doesn't send webhooks for repositories you don't administer.
+
+**The token.** GitHub serves the notifications endpoints to a personal access token (classic) only; a fine-grained token can't read them. Give it the narrowest scopes that work: `notifications`, plus `public_repo` when the repositories are public. `repo` is full read and write access to every private repository the account can reach, so use it only when a repository or an enabled operation needs it (see the workflow scope requirement below).
+
+**Merge, reviews and Actions with a user token.** These tools use that same
+user token, never an App installation token. The host grant and `GITHUB_REPOS`
+still apply. `GITHUB_MERGE_BASE_ALLOW` and `GITHUB_WORKFLOW_ALLOW` are empty by
+default in both modes: enabling a feature set alone authorizes no merge or
+workflow write. An **unscoped** entry such as `main` or `review.yml` applies to
+**every repository in `GITHUB_REPOS`**, including a third party's upstream in a
+multi-owner contributor deployment. Use `owner/name:branch` and
+`owner/name:file` to authorize only the intended repository, for example
+`GITHUB_MERGE_BASE_ALLOW=my-login/my-fork:main` and
+`GITHUB_WORKFLOW_ALLOW=my-login/my-fork:review.yml`. Startup warns (but does not
+refuse or narrow permissions) when either list contains an unscoped entry and
+`GITHUB_REPOS` spans multiple owners. Pass the reviewed head `sha` to merge/update; the tools send
+GitHub the full current head sha as the write guard. `update_branch` refuses
+fork heads (even the token owner's fork) and heads that are bases, protected,
+default, or targeted by another open pull request. It also refuses when those
+branch facts cannot be read. This is intentionally narrower than GitHub's UI.
+
+Scopes do not give the account repository rights it lacks. GitHub documents
+`repo` for classic-token [workflow dispatch](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)
+and [workflow re-runs](https://docs.github.com/en/rest/actions/workflow-runs#re-run-a-workflow),
+not merely `public_repo`; do not broaden a token just to silence a refusal.
+Changing workflow files can also need the separate
+[`workflow` scope](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps#available-scopes).
+GraphQL review reads and thread resolution use the user's access; missing
+[GraphQL permissions](https://docs.github.com/en/graphql/guides/forming-calls-with-graphql#authenticating-with-graphql)
+are returned as tool errors, as are REST permission failures. Synthetic tests
+cover successful requests and refusals, not the permissions of a deployed
+account. There is no permission escalation or App-token fallback.
+
+In contributor mode, a `dispatch_workflow` run produces **no event or wake**:
+there is no workflow-run ingress, so poll `list_workflow_runs` for its outcome.
+`rerun_workflow_run` results can arrive only for the token user's own open
+pull-request heads, through check polling on the head TTL (ten minutes for a
+finished, unchanged head, then the next eligible poll), not immediately after
+the re-run request. Runs outside those heads must also be polled with
+`list_workflow_runs`.
+
+**The account.** Use an account the agent alone posts from, such as a machine account. GitHub shows the agent's comments, reviews and pull requests as that account's, and this server treats everything that account does as the agent's own: its own events are tagged from-self and don't wake it, and the comment tools let it edit and delete that account's comments. This is account ownership, not proof that this process wrote a comment. A human's later edits are not protected by a version check: an edit or sticky update can overwrite them, and rollback can restore an older body or delete an agent-created comment after a human changed it. Do not share the posting account or treat rollback as safe concurrent editing.
+
+**How events get in.** Notification polling pauses without API calls or state changes until a connected MCPL host has at least one granted event egress, and pauses again if that ceases to be true. The server lists `GET /notifications?all=true&participating=true&since=…` from where the last listing got to, with `If-Modified-Since` after a complete listing, so an idle inbox can return a `304` that doesn't count against the rate limit. Truncated listings instead retain their window for an unconditional retry. Read and unread threads are listed alike, and nothing is marked read. For each listed issue or pull request in `GITHUB_REPOS`, it reads what is new since its last read: comments, a pull request's review comments and submitted reviews, and its state. Each becomes the same `push/event` and `channels/incoming`, with the same tags and metadata, as in App mode. A thread opened since the last pass arrives as opened, a close or merge as closed (a merge tagged `github:pr=merged` too), with whoever closed or merged it as the actor, and an edit to an issue as edited, attributed to whoever opened it, since GitHub's row doesn't say who edited it; a thread opened and closed between two passes arrives as closed. An edit to a closed issue or pull request arrives as nothing. A reopened issue arrives as edited, as with App mode's repository poll, and a reopened pull request as nothing, as with a webhook delivery. A listed pull request whose notification gives `review_requested` as its reason arrives as `pull.review_requested` too, with the pull request's author as the actor, since the notification doesn't say who asked. It arrives once for each update of the notification listed with that reason, so if GitHub keeps the reason while the thread moves on, a later update, a comment for one, brings it again. Each pass also looks up the checks on the heads of the open pull requests the token's user authored in `GITHUB_REPOS`, the 100 most recently updated, 20 a pass and in turns past that, and a head whose checks have all finished arrives as `checks.completed`, as in App mode, once for each conclusion and set of failed jobs. Once a head's result has arrived with every run finished, it isn't looked up again until its pull request is updated or ten minutes have passed since its head was read, so a re-run on the same head is seen on the first look after that, a pass or so past ten minutes. A head with no check runs two minutes after it was read is left the same way, so runs created later than that arrive with the next look. A failure that arrives while other runs go is looked up each pass until they finish. The tools' `search_issues` searches one repository in `GITHUB_REPOS`: it drops `repo:`, `user:`, `org:` and `owner:` qualifiers from the query, and leaves out, and counts, any result on the page from another repository.
+
+**What a pass costs.** The listing, one request a page of 50 threads, free when it's a `304`. One search for the token user's open pull requests, on the search API's own limit of 30 a minute, which the tools' `search_issues` shares, on every pass whose thread reads met no rate limit, a `304`'s included. Then for each of them not left as above, up to 20 a pass and in turns past that, one check-runs request, more past 100 runs, and one more for its head when it moved since the last pass or that read is ten minutes old. With 20 open pull requests whose checks have finished and nothing moving, that's about 240 requests an hour, besides the 60 searches. Then, for each thread it lists or that waits, two requests for an issue (its row and its comments) and four for a pull request (its row, its comments, its review comments and its reviews), each list taking more when its new rows run past a page, and the reviews one more once a pull request has more than 100 reviews. The first time the server handles an event on a thread after it starts, its event pipeline also reads the thread itself (for a pull request, with its head's check runs), its comments and a pull request's review threads, to learn whether the agent took part there, as in App mode. The agent's own tool calls draw on the same 5,000 an hour.
+
+**When a thread can't be read or delivered.** A thread whose read or thread-event handoff fails (neither granted egress accepts the thread event) waits on a retry list that keeps its place, and is read first on each later eligible pass whose listing gets through, for up to five failed passes in a row. A refused `checks.completed` instead stays on its head/TTL schedule, with no retry limit and no drop notice. Acceptance by either `channels/incoming` or `push/event` counts as delivery; a decline by the sibling egress is logged and treated as final, so the message is not re-sent on that egress. Failed handoffs hold the thread's cursor, not the global listing watermark or conditional header. At the retry limit the server stops trying that notification update and attempts one `thread.read_failed` notice, naming the cause, tagged `chat:mention`; a thread gone or out of the token's reach gets that at once. A retained terminal retry record prevents the same thread/update from starting another retry cycle or repeating the notice, including across restart and if the notice itself was refused. A strictly newer notification update reopens the thread from its retained cursor. GitHub's rate limit counts no pass against a thread: it ends the pass's reads, and the rest wait for the next pass. A thread with more new rows in one of its lists (comments, review comments or reviews) than one read takes, 2,000 a list, is read from its latest update on, and its `thread.read_failed` event says its backlog was skipped. A listing that runs past 20 pages (1,000 threads) delivers what it listed, retains the original window and reach-back anchor, clears the conditional header, and logs an error before retrying unconditionally on the next eligible pass. A persistently saturated window can repeat without reaching its tail; its repeated listing pages and thread reads can exhaust the token's rate limit and degrade tools that share it.
+
+**Where delivery begins.** With no watermark stored, the first start or pass with an eligible host begins one poll interval before that point and logs the instant to stderr. No initial watermark is written while polling is paused; an existing watermark survives the pause. GitHub writes a notification some seconds after the activity it reports (about 20 s on one account in October 2026). So a thread read for the first time is read from five minutes before GitHub's previous answer to a listing, or, at a first start, five minutes before that instant. Comments and reviews from those five minutes arrive, and so does an opening or a close; anything older on that thread doesn't. A thread that opened in those five minutes arrives as opened, with its text as it is now. Otherwise an edit on a thread read for the first time arrives as nothing, since with nothing to compare it with, an edit can't be told from a comment's bump: an edit that mentions the agent on an older issue it hasn't read before doesn't reach it.
+
+**What it can't see.** Threads you aren't part of, pushes, and the checks on pull requests the token's user didn't open. GitHub lists a pull request's thread when someone pushes to it, but none of what this mode reads of a thread shows a push, so it delivers nothing for one. The agent learns of new commits from what comes with them, from a check result, or by reading the pull request. An edit to an open pull request arrives as nothing, as with a webhook delivery. A mention arrives with the comment, review or opening that carries it.
+
+**Security.** A user token can do whatever its user can, wherever the user can. The tools' repository and merge/workflow allow-lists still apply, but they're the server's limits, not GitHub's. An `APPROVE` through `github.review` is the user's own approval, and counts toward branch protection wherever the user has write access; the shipped recipe doesn't enable that feature set.
+
+The recipe is App mode's contributor one, [`examples/recipe-contributor.json`](examples/recipe-contributor.json): its wake policies serve both modes, and the launcher reads this mode's variables from the same environment file.
 
 ## Plain-MCP mode
 
@@ -330,11 +406,13 @@ surface is checked at its own call — `channels.register` to announce a channel
 | Feature set | Tools | Rollback |
 | --- | --- | --- |
 | `github.events` | — (push events and `channels/incoming` delivery) | no |
-| `github.read` | `get_issue`, `get_pull_request`, `list_comments`, `list_review_threads`, `list_pull_request_files`, `get_check_runs`, `search_issues` | no |
+| `github.read` | `get_issue`, `get_pull_request`, `list_comments`, `list_review_threads`, `list_reviews`, `list_pull_request_files`, `get_check_runs`, `search_issues` | no |
 | `github.comments` | `comment`, `reply_in_thread`, `edit_own_comment`, `delete_own_comment`, `upsert_sticky_comment` | **yes** |
 | `github.review` | `create_review`, `resolve_thread`, `unresolve_thread` | no (GitHub cannot delete a review) |
 | `github.issues` | `create_issue`, `edit_issue`, `close_issue`, `reopen_issue` | no |
 | `github.pr` | `create_pull_request`, `edit_pull_request`, `request_review` | no |
+| `github.merge` | `merge_pull_request`, `update_branch` | no (a merge cannot be undone) |
+| `github.actions` | `list_workflow_runs`, `dispatch_workflow`, `rerun_workflow_run` | no |
 
 Notes worth knowing before you grant them:
 
@@ -344,8 +422,33 @@ Notes worth knowing before you grant them:
   `rayforce-audit` does with `<!-- rayforce-audit-failure-comment -->`.
 - `create_pull_request` and a base change in `edit_pull_request` refuse a base
   outside `GITHUB_PR_BASE_ALLOW`. Empty means no pull request may be opened.
-- `github.pr` has no merge tool and no branch deletion. There is nothing to
-  disable; the capability does not exist.
+- `github.pr` has no merge tool and no branch deletion: opening a pull request
+  and landing one are separate grants. `merge_pull_request` is
+  `github.merge`'s, and it refuses a base outside `GITHUB_MERGE_BASE_ALLOW`
+  (empty = no merge), a draft, a closed or merged pull request, and — given
+  `sha`, the head you reviewed, full or 7+ hex digits — a head that has moved
+  since. Branch protection (required checks, approvals) stays GitHub's to
+  enforce. `delete_branch: true` deletes the merged head branch only when it
+  lives in the base repository and is nobody's base: not named by an
+  allow-list, not protected on GitHub, not the default branch, and not the
+  base of another open pull request — so a back-merge `release → dev` keeps
+  a `release` that no allow-list names, as long as GitHub protects it, it is
+  the default branch, or another open pull request targets it.
+- `update_branch` merges the base into a pull request's head branch, as
+  GitHub's "Update branch" button does. That writes a commit, so it takes a
+  merge's fences: an open pull request into a base `GITHUB_MERGE_BASE_ALLOW`
+  names, and a head branch of the pull request's own repository that is
+  nobody's base, judged as for `delete_branch`. A fork's branch is left to
+  its owner.
+- `dispatch_workflow` and `rerun_workflow_run` act only on workflow files
+  `GITHUB_WORKFLOW_ALLOW` names (empty = none), and a dispatch runs only on a
+  base branch, so the workflow that runs is one that was reviewed and merged.
+  The use it was built for: a review workflow that ignores comments from bots
+  still takes a `workflow_dispatch` (`review.yml` with `{"pr-number": "12"}`).
+  `list_workflow_runs` is a read and is not fenced.
+- `list_reviews` answers the newest 50 reviews and the total — a pull request
+  that has been through many bot review rounds passes GitHub's first REST page
+  quickly, and REST pages oldest first, so it asks GraphQL for the last ones.
 - Every write tool refuses a repository outside `GITHUB_REPOS`, by name,
   before the call reaches GitHub.
 
@@ -380,6 +483,7 @@ contract and is listed here in full.
 | `github:review-comment` | an inline comment on a diff |
 | `github:ci=` | `success`, `failure` |
 | `github:push` | a push with no thread attached |
+| `github:read-failed` | contributor mode stopped reading a thread until it next moves, or skipped its backlog; the event also carries `chat:mention`, since the server addresses it to the agent |
 | `github:actor=maintainer` | the actor is in `GITHUB_MAINTAINERS` |
 
 **Metadata.** Booleans first — these are what `metadataTrue` matches:
@@ -410,7 +514,7 @@ reach metadata and never reach the model.
   other logins. A separate service user would not change that on a host where
   the agent has passwordless `sudo`, which is the usual agent host. What
   bounds a leaked key is the rest of this list: the repository allow-list, the
-  permissions below, no merge. Generating a new key in the App's settings and
+  permissions below, the merge and workflow allow-lists. Generating a new key in the App's settings and
   deleting the old one revokes it. [docs/deploy.md](docs/deploy.md#who-can-read-the-key)
   has the cases where isolation is real.
 - **An allow-list of repositories.** `GITHUB_REPOS` is required. Events from
@@ -422,7 +526,12 @@ reach metadata and never reach the model.
 - **A base allow-list.** `GITHUB_PR_BASE_ALLOW` is empty by default, which
   means no pull request may be opened or retargeted at all. For rayforce it is
   `dev`, so the release branch is unreachable even by mistake.
-- **No merge.** No tool merges, closes a release branch or deletes a branch.
+- **Merge and workflows are opt-in twice.** A host has to grant
+  `github.merge` or `github.actions`, *and* the operator has to name the
+  bases (`GITHUB_MERGE_BASE_ALLOW`) or the workflow files
+  (`GITHUB_WORKFLOW_ALLOW`) they may touch. Either alone does nothing. Keep
+  release branches out of both, and protect them on GitHub as well: branch
+  protection is the fence that holds even if the key leaks.
 - **Bodies from strangers are data, not instructions.** An issue body, a
   comment, a review and a check's output are text written by other people,
   reaching a model that holds a write token. The server forwards them as
@@ -430,12 +539,27 @@ reach metadata and never reach the model.
   prompt has to say so, and both example recipes do. Treat anyone who can
   open an issue on the repository as someone who can type into your agent's
   context.
-- **The permissions are the minimum the tools need:** `issues: write` (issue
-  tools and issue comments), `pull_requests: write` (PR tools, reviews,
-  review-comment replies, review-thread resolution), `contents: read` (file
-  lists and refs; never write), `checks: read` (check runs and conclusions),
-  `metadata: read` (mandatory for every App). No `administration`, no
-  `workflows`, no `members`, no OAuth user flow — the App acts only as itself.
+- **The permissions, by what needs them.** Grant the App only the rows for
+  the feature sets you enable; a tool whose permission is missing fails with
+  GitHub's 403 and nothing else breaks.
+
+  | Permission | Needed by |
+  | --- | --- |
+  | `metadata: read` | every App (mandatory) |
+  | `issues: write` | `github.issues`, issue comments |
+  | `pull_requests: write` | `github.pr`, `github.review`, review-comment replies, `list_reviews` |
+  | `checks: read` | `get_check_runs`, the check summary of `get_pull_request` |
+  | `contents: read` | file lists and refs |
+  | `contents: write` | `github.merge` (merge, update branch, delete the merged branch), and `resolve_thread` / `unresolve_thread`: GitHub refuses `resolveReviewThread` to an App that cannot write contents, whatever its pull-request permission |
+  | `workflows: write` | `merge_pull_request` and `update_branch` on a pull request that changes `.github/workflows/` (GitHub refuses an App that lacks it) |
+  | `actions: write` | `github.actions` (`actions: read` is enough for `list_workflow_runs` alone) |
+
+  [`app-manifest.json`](app-manifest.json) asks for the minimum surface:
+  everything above except `workflows` and `actions`, which only the opt-in
+  feature sets use. Add those two on the App's **Permissions** page when you
+  enable `github.merge` or `github.actions`, and accept the new permissions
+  on the installation. No `administration`, no `members`, no OAuth user flow
+  — the App acts only as itself.
 
 ## Limits in v1
 
@@ -447,7 +571,10 @@ reach metadata and never reach the model.
   the agent reads the log by following the URL as a human would, or does
   without. (RFC-005 references for logs and diffs are on the roadmap, not
   here.)
-- **No merge, no branch deletion, no release-branch write.**
+- **No push.** Commits are written only by GitHub's own pull-request merge
+  (onto an allowed base) and "Update branch" (onto a head branch that is
+  nobody's base, of a pull request into an allowed base). No tool pushes a
+  commit, creates a branch or touches a branch outside a pull request.
 - **Polling is no faster than 60 s** and cannot see pushes that touch no
   thread.
 - **No reactions, no labels, no assignees, no projects, no releases.**
@@ -461,9 +588,9 @@ npm test
 npm run build     # tsc into dist/
 ```
 
-Node 22 (`npm test` runs on 22.12 or newer), ESM, TypeScript. Stdout
-carries only JSON-RPC: every diagnostic goes through the `Logger`, which
-writes to stderr. No test in this package reaches the network.
+Node 22.12 or newer, ESM, TypeScript. Stdout carries only JSON-RPC: every
+diagnostic goes through the `Logger`, which writes to stderr. No test in this
+package reaches the network.
 
 | File | Work package | Role |
 | --- | --- | --- |
@@ -473,7 +600,7 @@ writes to stderr. No test in this package reaches the network.
 | `webhook.ts`, `poller.ts` | .3 | Ingress: signature-checked deliveries and repository since-polls become `NormalizedEvent`s; dedup; allow-list. |
 | `tags.ts`, `content.ts` | .4 | Pure functions: `tagsFor`, `renderEvent`, `renderThread`, `renderPullRequestSummary`, `renderChecks`, all bounded by `LIMITS`. |
 | `channels.ts` | .5 | Channel registry and descriptors, lazy registration, `channels/incoming`, `channels/publish`, typing as a no-op. |
-| `feature-sets.ts`, `tools-*.ts` | .6 | Feature-set declarations and the read, issues, pr and review tools. |
+| `feature-sets.ts`, `tools-*.ts` | .6 | Feature-set declarations and the read, issues, pr and review tools; the merge (`tools-merge.ts`) and actions (`tools-actions.ts`) tools came after v1. |
 | `tools-comments.ts`, `state.ts` | .7 | Comment tools including the sticky upsert; checkpoint lineage and rollback. |
 | `server.ts`, `index.ts` | .9 | Handshake, `featureSets/update`, tool routing, the event pipeline, plain-MCP mode. |
 
