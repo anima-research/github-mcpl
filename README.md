@@ -395,11 +395,14 @@ Notes worth knowing before you grant them:
   lives in the base repository and is nobody's base: not named by an
   allow-list, not protected on GitHub, not the default branch, and not the
   base of another open pull request — so a back-merge `release → dev` keeps
-  `release` even though `release` is in no allow-list.
+  a `release` that no allow-list names, as long as GitHub protects it, it is
+  the default branch, or another open pull request targets it.
 - `update_branch` merges the base into a pull request's head branch, as
   GitHub's "Update branch" button does. That writes a commit, so it takes a
   merge's fences: an open pull request into a base `GITHUB_MERGE_BASE_ALLOW`
-  names, and a head that is not itself a base branch.
+  names, and a head branch of the pull request's own repository that is
+  nobody's base, judged as for `delete_branch`. A fork's branch is left to
+  its owner.
 - `dispatch_workflow` and `rerun_workflow_run` act only on workflow files
   `GITHUB_WORKFLOW_ALLOW` names (empty = none), and a dispatch runs only on a
   base branch, so the workflow that runs is one that was reviewed and merged.
@@ -532,9 +535,9 @@ reach metadata and never reach the model.
   without. (RFC-005 references for logs and diffs are on the roadmap, not
   here.)
 - **No push.** Commits are written only by GitHub's own pull-request merge
-  (onto an allowed base) and "Update branch" (onto the head of a pull request
-  into an allowed base). No tool pushes a commit, creates a branch or touches
-  a branch outside a pull request.
+  (onto an allowed base) and "Update branch" (onto a head branch that is
+  nobody's base, of a pull request into an allowed base). No tool pushes a
+  commit, creates a branch or touches a branch outside a pull request.
 - **Polling is no faster than 60 s** and cannot see pushes that touch no
   thread.
 - **No reactions, no labels, no assignees, no projects, no releases.**

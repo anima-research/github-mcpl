@@ -123,6 +123,8 @@ export class FakeGitHubApi implements GitHubApi {
   deleteBranchError: Error | null = null;
   /** What `branchFacts` answers, by branch name; absent = an ordinary unprotected branch. */
   readonly branchFactsByName = new Map<string, BranchFacts>();
+  /** What `branchFacts` throws instead, while set (GitHub unreachable, or a 404). */
+  branchFactsError: Error | null = null;
   /** A head that moves after the tool read it and before GitHub merges (the 409 race). */
   moveHeadBeforeMerge: string | null = null;
   private nextNumber = 1;
@@ -630,6 +632,7 @@ export class FakeGitHubApi implements GitHubApi {
 
   async branchFacts(repo: RepoRef, branch: string): Promise<BranchFacts> {
     this.record('branchFacts', repo, branch);
+    if (this.branchFactsError !== null) throw this.branchFactsError;
     return this.branchFactsByName.get(branch) ?? { protected: false, isDefault: false, openPullsBasedOn: 0 };
   }
 
