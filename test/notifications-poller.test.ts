@@ -1103,7 +1103,7 @@ for (const reviewRequest of [true, false]) {
     const paused = await poller.pollOnce();
     assert.equal(paused.failed, 0);
     assert.equal(paused.dropped, 0);
-    assert.deepEqual(events, []);
+    assert.equal(events.length, 0);
     assert.equal(r.state.polledHead(cursorKey), held, 'a paused skip must not commit its cursor');
     const [retry] = r.state.notificationRetries();
     assert.equal(retry.attempts, 0);
