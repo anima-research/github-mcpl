@@ -2819,7 +2819,7 @@ for (const last of ['2', '3', '100000', '9'.repeat(400)]) {
     });
     const read = () => r.adapter.listReviewsSince(PULL, '2026-10-14T00:00:00Z');
     if (Number(last) <= 3) assert.equal((await read()).length, 1, 'page one still holds a new review');
-    else await assert.rejects(read, ReadCapError, 'an inconclusive empty walk still respects the read cap');
+    else await assert.rejects(read, (err: unknown) => err instanceof GitHubApiError && !(err instanceof ReadCapError) && /inconsistent reviews listing/.test(err.message), 'empty pages do not prove a large backlog');
     const asked = r.fake.for('GET /repos/anima-research/rayforce/pulls/12/reviews').map((call) => call.query.page);
     assert.deepEqual(asked.slice(0, 2), ['1', String(Math.min(Number(last), Number.MAX_SAFE_INTEGER))]);
     assert.ok(asked.length <= 22, 'page one, twenty pages, and at most one boundary probe');
@@ -2861,13 +2861,13 @@ for (const [last, populated] of [[3, [1, 2]], [4, [1, 2, 3]], [5, [1, 2]]] as co
   });
 }
 
-test('sparse review walk: an all-empty last=25 listing still hits the read cap', async () => {
+test('sparse review walk: an all-empty last=25 listing fails without claiming a large backlog', async () => {
   const r = await tokenRig((fake) => {
     fake.on('GET /repos/anima-research/rayforce/pulls/12/reviews', (req, nth): Answer => {
       if (nth > 24) return { status: 422, body: { message: 'synthetic request budget exceeded' } };
       return { body: [], headers: Number(req.query.page) === 1 ? { link: '<https://api.github.com/reviews?page=25>; rel="last"' } : {} };
     });
   });
-  await assert.rejects(() => r.adapter.listReviewsSince(PULL, '2026-10-14T00:00:00Z'), ReadCapError);
+  await assert.rejects(() => r.adapter.listReviewsSince(PULL, '2026-10-14T00:00:00Z'), (err: unknown) => err instanceof GitHubApiError && !(err instanceof ReadCapError) && /inconsistent reviews listing/.test(err.message));
   assert.equal(r.fake.for('GET /repos/anima-research/rayforce/pulls/12/reviews').length, 22, 'page one plus twenty pages and a boundary probe');
 });

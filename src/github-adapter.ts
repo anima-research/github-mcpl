@@ -1728,6 +1728,8 @@ export class GitHubAdapter implements GitHubApi {
    * {@link THREAD_MAX_PAGES} pages holding new reviews fail the read, as the
    * other per-thread reads do ({@link ReadCapError}), and so does a `Link` that
    * names a next page but no last, which this read couldn't walk back from.
+   * Exhausting the walk on empty pages is an inconsistent-listing failure,
+   * not evidence of a large backlog: callers must retain their cursor.
    */
   async listReviewsSince(pull: ThreadRef, since: string): Promise<PolledReview[]> {
     const sinceMs = Date.parse(since);
@@ -1760,7 +1762,7 @@ export class GitHubAdapter implements GitHubApi {
       if (batch.length === 0) {
         // A shrinking or sparse tail says nothing about earlier pages.
         // Keep walking, but an all-empty walk must obey the same read budget.
-        if (last - page >= THREAD_MAX_PAGES) throw new ReadCapError('listReviewsSince');
+        if (last - page >= THREAD_MAX_PAGES) throw new GitHubApiError(0, 'inconsistent reviews listing: empty pages exhausted the read budget', 'listReviewsSince');
         page -= 1;
         continue;
       }

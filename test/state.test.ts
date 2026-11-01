@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { GithubState, ROOT_BUCKET, STATE_VERSION, emptySnapshot, type GithubStateSnapshot } from '../src/state.js';
-import { POLL_DEDUP_RING, POLL_HEAD_MEMORY, type Logger } from '../src/types.js';
+import { POLL_DEDUP_RING, POLL_HEAD_MEMORY, NOTIFICATION_TERMINAL_MEMORY, type Logger } from '../src/types.js';
 
 const REPO = 'anima-research/rayforce';
 
@@ -529,4 +529,28 @@ test('App poll cursors and contributor notification state coexist across flush a
   assert.equal(loaded.lastPollAt(), since);
   loaded.setPollCursors({});
   assert.equal(loaded.notificationRetries()[0].reviewRequest?.id, 'n7');
+});
+
+test('terminal notification memory is bounded on write and load without evicting active retries', async () => {
+  const file = tempFile();
+  const state = GithubState.empty(file);
+  const terminal = Array.from({ length: NOTIFICATION_TERMINAL_MEMORY + 10 }, (_, number) => ({
+    owner: 'o', name: 'n', number: number + 1, kind: 'issue' as const,
+    attempts: 5, stopped: true, dropAnnounced: true, updatedAt: '2026-10-15T00:09:30Z',
+  }));
+  const active = Array.from({ length: NOTIFICATION_TERMINAL_MEMORY + 1 }, (_, number) => ({
+    owner: 'o', name: 'n', number: number + 1000, kind: 'issue' as const, attempts: 2, cursor: 'held',
+  }));
+  const entries = [...terminal.slice(0, 10), ...active, ...terminal.slice(10)];
+  state.setNotificationRetries(entries);
+  const kept = state.notificationRetries();
+  assert.deepEqual(kept.filter((retry) => !retry.stopped), active);
+  assert.deepEqual(kept.filter((retry) => retry.stopped), terminal.slice(10));
+  await state.flush();
+  assert.deepEqual(GithubState.load(file).notificationRetries(), kept);
+  // Old state files get the same cap before any poll runs.
+  writeFileSync(file, JSON.stringify({ ...emptySnapshot(), notifications: {
+    since: null, lastModified: null, answeredAt: null, retry: entries,
+  } }));
+  assert.deepEqual(GithubState.load(file).notificationRetries(), kept);
 });

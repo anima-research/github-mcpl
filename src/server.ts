@@ -1289,7 +1289,8 @@ export class GitHubMcplServer {
   readonly canReceiveEvents = (): boolean => {
     const conn = this.conn;
     return !!conn && !conn.isClosed &&
-      (this.eventEgressAllowed(conn, 'push') || this.eventEgressAllowed(conn, 'incoming'));
+      (this.eventEgressAllowed(conn, 'push') ||
+        (this.grant.has('channels.register') && this.eventEgressAllowed(conn, 'incoming')));
   };
 
   readonly onEvent = (event: NormalizedEvent): Promise<boolean> => this.handleEvent(event);

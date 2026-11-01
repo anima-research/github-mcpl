@@ -79,7 +79,8 @@
  * not, until it gets through or has failed {@link NOTIFICATION_RETRY_LIMIT}
  * passes in a row. Then it's dropped, with one `thread.read_failed` event on
  * its channel saying why. A terminal retry entry retains the count and cursor
- * so the same notification cannot restart the cycle; a newer update reopens it.
+ * so the same notification cannot restart the cycle while retained; a newer update reopens it.
+ * Terminal records are bounded to the newest 200; active retries are never evicted.
  * A drop notice is attempted once per notification update, even if refused. A thread gone or
  * out of the token's reach is dropped at once. GitHub's rate limit counts no
  * pass against a thread: it ends the pass's reads, the threads not yet read
@@ -324,7 +325,12 @@ const retryEntry = (
   ...(reviewRequest === undefined ? {} : { reviewRequest }),
 });
 
-/** A thread whose new rows are more than one read takes, with its row as read, so its cursor can move to its current update. */
+/** Egress disappeared during an in-flight pass; preserve its work without a failure. */
+class HostUnavailable extends Error {
+  constructor() { super('host egress is unavailable'); }
+}
+
+/** A read with a proven excess of new rows, whose cursor may move to the current update. */
 class BacklogTooLarge extends Error {
   constructor(readonly row: PolledIssue) {
     super('more new comments or reviews than one read takes');
@@ -338,7 +344,7 @@ class BacklogTooLarge extends Error {
  * else. `cause` is written for the agent.
  */
 interface ThreadFailure {
-  kind: 'lasting' | 'rate-limit' | 'failed' | 'backlog';
+  kind: 'lasting' | 'rate-limit' | 'failed' | 'backlog' | 'paused';
   cause: string;
 }
 
@@ -589,10 +595,11 @@ export class NotificationsPoller {
       const waiting = listed.get(channel) ?? retries.get(channel);
       const attemptsSoFar = waiting?.attempts ?? 0;
       const request = requests.get(channel);
-      if (rateLimited > 0) {
+      if (rateLimited > 0 || !this.ready()) {
+        // Host loss, like a rate limit, preserves pending work without an attempt.
         // GitHub's rate limit ended this pass's reads: the rest wait for the next, uncounted.
         retries.set(channel, retryEntry(thread, attemptsSoFar, this.holdPlace(thread, reachFrom, waiting?.cursor ?? null), request, waiting));
-        rateLimited += 1;
+        if (rateLimited > 0) rateLimited += 1;
         continue;
       }
       const outcome = await this.pollThread(thread, reachFrom, receivedAt, alreadySeen, waiting?.cursor ?? null, request);
@@ -602,9 +609,13 @@ export class NotificationsPoller {
         if (waiting?.dropAnnounced) {
           // A review request can finish after its backlog notice. Keep the
           // notice's terminal record so re-listing that update cannot repeat it.
+          retries.delete(channel);
           retries.set(channel, { ...retryEntry(thread, attemptsSoFar,
             this.state.polledHead(`notif:${channel}`), undefined, waiting), stopped: true });
         } else retries.delete(channel);
+      } else if (outcome.failure.kind === 'paused' || !this.ready()) {
+        retries.set(channel, retryEntry(thread, attemptsSoFar,
+          this.holdPlace(thread, reachFrom, waiting?.cursor ?? null), outcome.request, waiting));
       } else {
         result.failed += 1;
         const place = this.state.polledHead(`notif:${channel}`);
@@ -621,6 +632,7 @@ export class NotificationsPoller {
             // A skipped backlog can still owe a review-request handoff, but
             // it shares the same five-pass budget and one notice.
             retry.stopped = !(outcome.failure.kind === 'backlog' && outcome.request && attempts < NOTIFICATION_RETRY_LIMIT);
+            if (retry.stopped) retries.delete(channel);
             if (!retry.dropAnnounced) {
               // Persist before the notice: a crash or refusal must not make
               // this same notification produce another drop announcement.
@@ -643,12 +655,14 @@ export class NotificationsPoller {
       this.logger.warn('notifications: GitHub rate-limited a read, so this pass read no further; those threads are read next pass', {
         threads: rateLimited,
       });
-    } else {
+    } else if (this.ready()) {
       const checks = await this.pollOwnChecks(receivedAt, alreadySeen);
       result.delivered.push(...checks.delivered);
       result.duplicates += checks.duplicates;
       result.checkLookups = checks.lookups;
     }
+
+    this.state.setNotificationRetries([...retries.values()]);
 
     // A capped prefix proves nothing about the timestamps of omitted rows.
     // Keep the entire window rather than assuming an ascending listing order.
@@ -719,6 +733,7 @@ export class NotificationsPoller {
 
     const delivered: NormalizedEvent[] = [];
     let duplicates = 0;
+    let paused = false;
     const deliver = async (candidates: Candidate[]): Promise<string | null> => {
       let refusal: string | null = null;
       for (const { event } of candidates) {
@@ -730,9 +745,10 @@ export class NotificationsPoller {
         try {
           await this.deliver(event);
         } catch (err) {
+          paused = err instanceof HostUnavailable;
           refusal = err instanceof Error ? err.message : String(err);
           this.logger.warn('notifications poll: event delivery failed; its key stays unrecorded for the next pass', { key, error: refusal });
-          continue;
+          break;
         }
         this.state.seenPollKey(key);
         alreadySeen.add(key);
@@ -747,7 +763,12 @@ export class NotificationsPoller {
     let read: { rows: Candidate[]; state: Candidate | null; row: PolledIssue };
     try {
       read = await this.readThread(thread, since, cursor, receivedAt);
+      if (!this.ready()) throw new HostUnavailable();
     } catch (err) {
+      if (!this.ready() || err instanceof HostUnavailable) {
+        this.holdPlace(thread, reachFrom, held);
+        return { delivered, duplicates, failure: { kind: 'paused', cause: 'host egress is unavailable' }, ...(request ? { request } : {}) };
+      }
       if (err instanceof BacklogTooLarge) {
         // The same read would meet the same cap again: read the thread from its current update on.
         this.state.setPolledHead(cursorKey, packCursor({ ...cursor, since: err.row.updatedAt }));
@@ -760,7 +781,9 @@ export class NotificationsPoller {
         return {
           delivered,
           duplicates,
-          failure: { kind: 'backlog', cause: 'it had more than 2,000 comments or reviews to read at once' },
+          failure: paused
+            ? { kind: 'paused', cause: 'host egress is unavailable' }
+            : { kind: 'backlog', cause: 'it had more than 2,000 comments or reviews to read at once' },
           ...(request && refused !== null ? { request } : {}),
         };
       }
@@ -777,10 +800,10 @@ export class NotificationsPoller {
 
     read.rows.sort((a, b) => (a.at === b.at ? a.event.id.localeCompare(b.event.id) : ms(a.at) - ms(b.at)));
     const rowsRefused = await deliver(read.rows);
-    const stateRefused = read.state ? await deliver([read.state]) : null;
+    const stateRefused = rowsRefused ?? (read.state ? await deliver([read.state]) : null);
     // A review request has no thread row of its own. A refused request stays
     // on the retry entry and holds the read cursor like any failed handoff.
-    const requestRefused = await deliver(requestEvent(read.row));
+    const requestRefused = stateRefused ?? await deliver(requestEvent(read.row));
 
     const failure = rowsRefused ?? stateRefused ?? requestRefused;
     const through = failure === null;
@@ -803,7 +826,7 @@ export class NotificationsPoller {
     return {
       delivered,
       duplicates,
-      failure: failure === null ? null : { kind: 'failed', cause: `the host refused one of its events (${failure})` },
+      failure: failure === null ? null : { kind: paused ? 'paused' : 'failed', cause: `the host refused one of its events (${failure})` },
       ...(request && requestRefused !== null ? { request } : {}),
     };
   }
@@ -831,7 +854,7 @@ export class NotificationsPoller {
     alreadySeen: Set<string>,
   ): Promise<{ delivered: NormalizedEvent[]; duplicates: number; lookups: number }> {
     const out = { delivered: [] as NormalizedEvent[], duplicates: 0, lookups: 0 };
-    if (!this.login) return out;
+    if (!this.login || !this.ready()) return out;
     let pulls: OwnPull[];
     try {
       pulls = await this.api.listOwnOpenPulls(this.login, this.repos);
@@ -856,6 +879,7 @@ export class NotificationsPoller {
     }
     const now = this.now().getTime();
     for (const pull of due) {
+      if (!this.ready()) break;
       const thread: ThreadRef = { repo: pull.repo, number: pull.number, kind: 'pull' };
       const channel = channelId(thread);
       let summary: ChecksSummary;
@@ -870,6 +894,7 @@ export class NotificationsPoller {
         if (!stands) {
           this.heads.set(channel, { updatedAt: pull.updatedAt, sha: await this.api.getPullHeadSha(thread), readAt: now, settled: false });
         }
+        if (!this.ready()) break;
         const sha = (this.heads.get(channel) as { sha: string }).sha;
         out.lookups += 1;
         summary = await this.api.getCheckRuns(pull.repo, sha);
@@ -883,6 +908,7 @@ export class NotificationsPoller {
         this.logger.warn('notifications: looking up a pull request\'s checks failed; it is looked up again next pass', { channel, error });
         continue;
       }
+      if (!this.ready()) break;
       tried += 1;
       const head = this.heads.get(channel) as { settled: boolean; readAt: number };
       if (!isCompletedSummary(summary)) {
@@ -932,6 +958,7 @@ export class NotificationsPoller {
     receivedAt: string,
   ): Promise<{ rows: Candidate[]; state: Candidate | null; row: PolledIssue }> {
     const row = await this.api.getPolledThread(thread);
+    if (!this.ready()) throw new HostUnavailable();
     let rows: Candidate[];
     try {
       rows = await this.readRows(thread, since, row, receivedAt);
@@ -957,10 +984,12 @@ export class NotificationsPoller {
     for (const comment of await this.api.listCommentsSince(thread, since)) {
       rows.push({ event: normalizePolledComment(thread.repo, comment, 'issue_comment', receivedAt), at: comment.updatedAt });
     }
+    if (!this.ready()) throw new HostUnavailable();
     if (thread.kind === 'pull') {
       for (const comment of await this.api.listPullReviewCommentsSince(thread, since)) {
         rows.push({ event: normalizePolledComment(thread.repo, comment, 'review_comment', receivedAt), at: comment.updatedAt });
       }
+      if (!this.ready()) throw new HostUnavailable();
       for (const review of await this.api.listReviewsSince(thread, since)) {
         rows.push({
           event: normalizePolledReview(thread.repo, thread, review, receivedAt, row.title),
@@ -987,7 +1016,13 @@ export class NotificationsPoller {
 
   /** Void listeners keep their legacy accepted-handoff contract; false is not success. */
   private async deliver(event: NormalizedEvent): Promise<void> {
-    if (await this.onEvent(event) === false) throw new Error('no host egress accepted the event');
+    if (!this.ready()) throw new HostUnavailable();
+    try {
+      if (await this.onEvent(event) === false) throw new Error('no host egress accepted the event');
+    } catch (err) {
+      if (!this.ready()) throw new HostUnavailable();
+      throw err;
+    }
   }
 
   /**

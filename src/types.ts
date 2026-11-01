@@ -984,7 +984,8 @@ export interface NotificationsWatermark {
  * limit kept from being read: the notifications poller reads it again on each
  * pass whose listing gets through, listed or not, until it gets through or has
  * failed {@link NOTIFICATION_RETRY_LIMIT} passes in a row. A stopped entry
- * retains that count and cursor until a newer notification reopens it.
+ * retains that count and cursor until a newer notification reopens it or the
+ * bounded terminal memory evicts it.
  */
 export interface NotificationRetry {
   /** Latest notification update seen; a strictly newer update reopens a stopped entry. */
@@ -1007,6 +1008,9 @@ export interface NotificationRetry {
 
 /** How many passes in a row a notified thread may fail before the poller drops it, naming it and the cause. */
 export const NOTIFICATION_RETRY_LIMIT = 5;
+
+/** How many stopped notification updates retain their cursor and one-notice dedup record. Active retries are never evicted. */
+export const NOTIFICATION_TERMINAL_MEMORY = 200;
 
 /** How many poll keys the dedup ring remembers. */
 export const POLL_DEDUP_RING = 2000;

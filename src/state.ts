@@ -41,6 +41,7 @@ import { dirname } from 'node:path';
 import {
   isIsoInstant,
   POLL_DEDUP_RING,
+  NOTIFICATION_TERMINAL_MEMORY,
   POLL_HEAD_MEMORY,
   silentLogger,
   type CheckpointRecord,
@@ -364,7 +365,7 @@ export class GithubState implements GithubStateStore {
   }
 
   setNotificationRetries(retries: NotificationRetry[]): void {
-    this.snap.notifications = { ...this.snap.notifications, retry: retries.map((r) => ({ ...r })) };
+    this.snap.notifications = { ...this.snap.notifications, retry: boundedNotificationRetries(retries).map((r) => ({ ...r })) };
   }
 
   seenPollKey(key: string): boolean {
@@ -476,7 +477,7 @@ function normalize(parsed: unknown): GithubStateSnapshot | null {
     since,
     lastModified: since !== null && typeof notifications?.lastModified === 'string' ? notifications.lastModified : null,
     answeredAt: since !== null ? instant(notifications?.answeredAt) : null,
-    retry: Array.isArray(notifications?.retry) ? notifications.retry.filter(isNotificationRetry) : [],
+    retry: Array.isArray(notifications?.retry) ? boundedNotificationRetries(notifications.retry.filter(isNotificationRetry)) : [],
   };
   return snap;
 }
@@ -542,4 +543,10 @@ function buckets<T>(raw: unknown): Record<string, T[]> {
     if (Array.isArray(value)) out[key] = value as T[];
   }
   return out;
+}
+
+/** Keep the newest terminal records in insertion order, without losing active work. */
+function boundedNotificationRetries(retries: NotificationRetry[]): NotificationRetry[] {
+  let excess = retries.filter((retry) => retry.stopped).length - NOTIFICATION_TERMINAL_MEMORY;
+  return retries.filter((retry) => !retry.stopped || excess-- <= 0);
 }

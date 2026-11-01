@@ -67,12 +67,24 @@ A `thread.read_failed` event is contributor mode's notifications poller saying,
 on the thread's own channel, that it stopped reading that thread's new
 activity: after five passes in a row that failed, or at once for a thread gone
 or out of the token's reach. Its body names the cause. The poller reads the
-thread again, from where it left off while its place is among the last 200
-threads it read, when the thread next moves on GitHub. The same event says a
+thread again when it next moves on GitHub, from its retained retry cursor
+or head-memory cursor. The newest 200 terminal retry records are retained;
+active retries are never evicted. A retained record prevents duplicate drop
+notices across restart. Eviction ends that guarantee and can lose its held
+cursor if head memory has also evicted it. The same event says a
 thread's backlog was skipped, when it had more new comments or reviews than
 one read takes, and that its new activity arrives as usual. Its actor is
 `github-mcpl[server]`, a login no GitHub account can have, so never the agent,
 and it carries `chat:mention` (§4), since the server addresses it to the agent.
+
+**Poison-event policy — implementer's proposal, not decided.** The current
+pipeline failure receipt also covers asynchronous tag-context lookups, so it
+cannot safely mean “permanently malformed event.” Proposed policy: distinguish
+deterministic tag/render failures from transient context/API failures and host
+refusals, then quarantine only the failing event key with a diagnostic before
+allowing later events through. Automatically skipping an event trades delivery
+for progress and needs owner approval; it is not implemented here. Until then,
+a persistent pipeline failure can hold a cursor and recur on a newer update.
 
 A conversation comment carries no `github:` tag of its own: the core
 vocabulary already says everything a recipe routes on (who wrote it, whether

@@ -558,7 +558,7 @@ for (const [thread, kinds] of [
   });
 }
 
-test('a refused comment beside a delivered close doesn\'t bring the close again', async () => {
+test('a refused comment holds the later close until the comment is accepted', async () => {
   const r = rig();
   r.github.threads.set(channelId(PULL), threadRow(PULL));
   r.github.notify(PULL, '2026-10-15T00:09:30Z');
@@ -571,15 +571,15 @@ test('a refused comment beside a delivered close doesn\'t bring the close again'
   r.github.lastModified = 'Wed, 15 Oct 2026 00:10:20 GMT';
   r.refuse.add('poll:issue_comment:60:2026-10-15T00:10:10Z');
   await r.poller.pollOnce();
-  assert.deepEqual(r.events.map((e) => e.kind), ['pull.closed']);
+  assert.equal(r.events.length, 0);
 
-  // The thread moves again; the comment arrives, and the close doesn't come twice.
+  // The thread moves again; the comment arrives before the waiting close.
   r.refuse.clear();
   r.github.threads.set(channelId(PULL), { ...merged, updatedAt: '2026-10-15T00:11:00Z' });
   r.github.notify(PULL, '2026-10-15T00:11:00Z');
   r.github.lastModified = 'Wed, 15 Oct 2026 00:11:00 GMT';
   await r.poller.pollOnce();
-  assert.deepEqual(r.events.map((e) => e.kind), ['pull.closed', 'comment.created']);
+  assert.deepEqual(r.events.map((e) => e.kind), ['comment.created', 'pull.closed']);
 });
 
 test('a thread whose cursor the head memory evicted reads from GitHub\'s previous answer, with no opening or close it already had', async () => {
@@ -1531,7 +1531,7 @@ for (const accepted of ['channel', 'push'] as const) {
   });
 }
 
-for (const unavailable of ['disconnected', 'plain-mcp', 'ungranted'] as const) {
+for (const unavailable of ['disconnected', 'plain-mcp', 'ungranted', 'incoming-without-register'] as const) {
   test(`host readiness: ${unavailable} skips twelve passes, resumes once, and pauses on disconnect`, async (t) => {
     const r = rig();
     r.github.threads.set(channelId(ISSUE), threadRow(ISSUE));
@@ -1543,6 +1543,7 @@ for (const unavailable of ['disconnected', 'plain-mcp', 'ungranted'] as const) {
     t.after(() => h.close());
     let server = unavailable === 'disconnected' ? new GitHubMcplServer(api) : h.server;
     if (unavailable !== 'disconnected') await initialize(h, unavailable !== 'plain-mcp');
+    if (unavailable === 'incoming-without-register') await grant(h, ['channels.incoming']);
     const transitions: string[] = [];
     const record = (message: string) => { transitions.push(message); };
     const poller = new NotificationsPoller({ api: r.github, state: r.state, intervalMs: 60000, repos: [REPO],
@@ -1658,3 +1659,118 @@ test('host readiness: revoking egress pauses an outstanding retry without consum
   assert.equal((await poller.pollOnce()).delivered.length, 1);
   assert.deepEqual(r.state.notificationRetries(), []);
 });
+
+test('a refused middle row holds all later rows, even across restart', async () => {
+  const file = join(mkdtempSync(join(tmpdir(), 'gh-notif-order-')), 'state.json');
+  const r = rig({ stateFile: file });
+  r.github.threads.set(channelId(ISSUE), threadRow(ISSUE));
+  r.github.comments.set(channelId(ISSUE), [1, 2, 3].map((id) => comment(id, 7, `2026-10-15T00:09:${id}0Z`)));
+  r.github.notify(ISSUE, '2026-10-15T00:09:30Z');
+  r.refuse.add('poll:issue_comment:2:2026-10-15T00:09:20Z');
+  await r.poller.pollOnce();
+  assert.deepEqual(r.events.map((e) => e.body), ['comment 1']);
+  assert.equal(r.state.snapshot().pollKeys.some((key) => key.includes('issue_comment:3:')), false);
+  const restarted = rig({ state: GithubState.load(file), github: r.github });
+  await restarted.poller.pollOnce();
+  assert.deepEqual(restarted.events.map((e) => e.body), ['comment 2', 'comment 3']);
+});
+
+for (const loss of ['listing', 'read', 'refusal', 'accepted'] as const) {
+  test(`mid-pass host loss during ${loss} pauses remaining threads without attempts and resumes in order`, async () => {
+    const r = rig();
+    for (const thread of [ISSUE, PULL]) {
+      r.github.threads.set(channelId(thread), threadRow(thread));
+      r.github.comments.set(channelId(thread), [1, 2].map((id) => comment(thread.number * 10 + id, thread.number, `2026-10-15T00:09:${id}0Z`)));
+      r.github.notify(thread, '2026-10-15T00:09:30Z');
+    }
+    let ready = true;
+    let triggered = false;
+    const list = r.github.listNotifications.bind(r.github);
+    r.github.listNotifications = async (opts) => {
+      const page = await list(opts);
+      if (loss === 'listing' && !triggered) { ready = false; triggered = true; }
+      return page;
+    };
+    const read = r.github.listCommentsSince.bind(r.github);
+    r.github.listCommentsSince = async (thread, since) => {
+      const rows = await read(thread, since);
+      if (loss === 'read' && !triggered) { ready = false; triggered = true; }
+      return rows;
+    };
+    const seen: string[] = [];
+    const poller = new NotificationsPoller({
+      api: r.github, state: r.state, intervalMs: 60000, repos: [REPO], login: 'agent',
+      now: () => new Date(START), canPoll: () => ready,
+      onEvent: (event) => {
+        if (!triggered) {
+          triggered = true;
+          ready = false;
+          if (loss === 'refusal') return false;
+        }
+        seen.push(event.body!);
+        return true;
+      },
+    });
+    const first = await poller.pollOnce();
+    assert.equal(first.failed, 0);
+    assert.equal(first.dropped, 0);
+    assert.deepEqual(r.state.notificationRetries().map((retry) => retry.attempts), [0, 0]);
+    assert.equal(r.github.calls.some((call) => call.startsWith('list own')), false);
+    assert.equal(r.github.calls.includes(`thread ${channelId(PULL)}`), false);
+    const before = r.state.snapshot();
+    await poller.pollOnce();
+    assert.deepEqual(r.state.snapshot(), before);
+    ready = true;
+    await poller.pollOnce();
+    assert.deepEqual(seen, ['comment 71', 'comment 72', 'comment 121', 'comment 122']);
+    assert.deepEqual(r.state.notificationRetries(), []);
+  });
+}
+
+test('inconsistent reviews listing retries from the held cursor without a backlog skip or notice', async () => {
+  const r = rig();
+  r.github.threads.set(channelId(PULL), threadRow(PULL));
+  r.github.notify(PULL, '2026-10-15T00:09:30Z');
+  r.github.listReviewsSince = async () => { throw new GitHubApiError(0, 'inconsistent reviews listing: empty pages exhausted the read budget', 'listReviewsSince'); };
+  const first = await r.poller.pollOnce();
+  assert.equal(first.failed, 1);
+  assert.equal(first.dropped, 0);
+  assert.equal(r.events.length, 0);
+  const held = r.state.notificationRetries()[0].cursor;
+  assert.ok(held?.startsWith(FIRST_READ));
+  r.github.listReviewsSince = async () => [];
+  r.github.comments.set(channelId(PULL), [comment(1, 12, '2026-10-15T00:08:00Z')]);
+  await r.poller.pollOnce();
+  assert.deepEqual(r.events.map((e) => e.body), ['comment 1']);
+});
+
+for (const loss of ['search', 'head', 'checks'] as const) {
+  test(`own-check phase pauses on host loss during ${loss} and does not settle undelivered checks`, async () => {
+    const r = rig();
+    r.github.ownPulls = [own(FIRST_W), own(FIRST_W, { ...PULL, number: 13 })];
+    r.github.heads.set(channelId(PULL), 'sha');
+    r.github.heads.set(channelId({ ...PULL, number: 13 }), 'sha-2');
+    r.github.checks.set('sha', { sha: 'sha', conclusion: 'success', total: 1, failed: [] });
+    r.github.checks.set('sha-2', { sha: 'sha-2', conclusion: 'success', total: 1, failed: [] });
+    let ready = true;
+    let triggered = false;
+    const pause = () => { if (!triggered) { ready = false; triggered = true; } };
+    const search = r.github.listOwnOpenPulls.bind(r.github);
+    r.github.listOwnOpenPulls = async (...args) => { const out = await search(...args); if (loss === 'search') pause(); return out; };
+    const head = r.github.getPullHeadSha.bind(r.github);
+    r.github.getPullHeadSha = async (...args) => { const out = await head(...args); if (loss === 'head') pause(); return out; };
+    const checks = r.github.getCheckRuns.bind(r.github);
+    r.github.getCheckRuns = async (...args) => { const out = await checks(...args); if (loss === 'checks') pause(); return out; };
+    const seen: string[] = [];
+    const poller = new NotificationsPoller({ api: r.github, state: r.state, intervalMs: 60000, repos: [REPO],
+      login: 'agent', now: () => new Date(START), canPoll: () => ready, onEvent: (event) => { seen.push(event.sha!); } });
+    await poller.pollOnce();
+    assert.equal(seen.length, 0);
+    assert.equal(r.state.snapshot().pollKeys.length, 0);
+    assert.equal(r.github.calls.some((call) => call === 'checks sha-2'), false);
+    if (loss !== 'checks') assert.equal(r.github.calls.some((call) => call.startsWith('checks ')), false);
+    ready = true;
+    await poller.pollOnce();
+    assert.deepEqual(seen, ['sha', 'sha-2']);
+  });
+}
