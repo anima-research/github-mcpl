@@ -1058,6 +1058,96 @@ test('a review request on a thread whose backlog is skipped still arrives, befor
   assert.deepEqual(r.events.map((e) => e.kind), ['pull.review_requested', 'thread.read_failed']);
 });
 
+for (const reviewRequest of [true, false]) {
+  test(`a backlog skip ${reviewRequest ? 'with' : 'without'} a review request holds its cursor on mid-pass host loss and announces once on recovery`, async () => {
+    const file = join(mkdtempSync(join(tmpdir(), 'gh-notif-')), 'state.json');
+    const r = rig({ stateFile: file });
+    const row = threadRow(PULL);
+    const cursorKey = `notif:${channelId(PULL)}`;
+    const held = `${FIRST_READ}\0\0\0`;
+    r.state.setPolledHead(cursorKey, held);
+    // Keep the notification inside the listing window for a same-update re-list.
+    r.github.lastModified = 'Wed, 15 Oct 2026 00:09:00 GMT';
+    r.github.threads.set(channelId(PULL), row);
+    r.github.notify(PULL, row.updatedAt, REPO, reviewRequest ? 'review_requested' : 'mention');
+    let ready = true;
+    let backlogCaught = false;
+    let guards = 0;
+    const reads: string[] = [];
+    r.github.listReviewsSince = async (_thread, since) => {
+      reads.push(since);
+      // Once the cursor advances, this backlog is no longer returned.
+      if (Date.parse(since) < Date.parse(row.updatedAt) - 1000) {
+        backlogCaught = true;
+        guards = 0;
+        throw new ReadCapError('listReviewsSince');
+      }
+      return [];
+    };
+    const events: NormalizedEvent[] = [];
+    const makePoller = (state: GithubState) => new NotificationsPoller({
+      api: r.github, state, intervalMs: 60000, repos: [REPO],
+      now: () => new Date(START),
+      canPoll: () => {
+        // The catch's initial readiness check passes; egress disappears at
+        // the request handoff, or at completion when there is no request.
+        if (backlogCaught && ++guards === 2) {
+          backlogCaught = false;
+          ready = false;
+        }
+        return ready;
+      },
+      onEvent: (event) => { events.push(event); return true; },
+    });
+    const poller = makePoller(r.state);
+    const paused = await poller.pollOnce();
+    assert.equal(paused.failed, 0);
+    assert.equal(paused.dropped, 0);
+    assert.deepEqual(events, []);
+    assert.equal(r.state.polledHead(cursorKey), held, 'a paused skip must not commit its cursor');
+    const [retry] = r.state.notificationRetries();
+    assert.equal(retry.attempts, 0);
+    assert.equal(retry.cursor, held);
+    assert.equal(retry.dropAnnounced, undefined);
+    assert.equal(!!retry.reviewRequest, reviewRequest);
+    const before = r.state.snapshot();
+    await poller.pollOnce();
+    assert.deepEqual(r.state.snapshot(), before, 'a fully paused pass leaves state untouched');
+
+    // Resume from disk after a 304: the retry, not the inbox, must carry the work.
+    const recovered = GithubState.load(file);
+    const restarted = makePoller(recovered);
+    ready = true;
+    // Keep egress available for the repeated cap failure on recovery.
+    r.github.listReviewsSince = async (_thread, since) => {
+      reads.push(since);
+      if (Date.parse(since) < Date.parse(row.updatedAt) - 1000) throw new ReadCapError('listReviewsSince');
+      return [];
+    };
+    const resumed = await restarted.pollOnce();
+    assert.equal(resumed.notModified, true);
+    assert.equal(resumed.failed, 1);
+    assert.equal(resumed.dropped, 1);
+    assert.deepEqual(events.map((event) => event.kind),
+      reviewRequest ? ['pull.review_requested', 'thread.read_failed'] : ['thread.read_failed']);
+    assert.match(events.at(-1)?.body ?? '', /skipped this thread's backlog/);
+    const skipped = `${row.updatedAt}\0\0\0`;
+    assert.equal(recovered.polledHead(cursorKey), skipped);
+    assert.equal(recovered.notificationRetries()[0].cursor, skipped);
+    assert.equal(recovered.notificationRetries()[0].dropAnnounced, true);
+    assert.equal(recovered.notificationRetries()[0].stopped, true);
+    assert.deepEqual(reads, ['2026-10-15T00:03:59Z', '2026-10-15T00:03:59Z']);
+
+    await restarted.pollOnce();
+    // Re-listing the same update must not repeat the notice either.
+    r.github.conditional = false;
+    const relisted = await restarted.pollOnce();
+    assert.equal(relisted.notModified, false);
+    assert.equal(events.filter((event) => event.kind === 'thread.read_failed').length, 1);
+    assert.equal(recovered.polledHead(cursorKey), skipped);
+  });
+}
+
 test('a review request refused beside a skipped backlog waits on a retry entry, and arrives after a 304 and a restart', async () => {
   const file = join(mkdtempSync(join(tmpdir(), 'gh-notif-')), 'state.json');
   const r = rig({ stateFile: file });

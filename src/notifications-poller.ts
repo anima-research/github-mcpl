@@ -617,6 +617,13 @@ export class NotificationsPoller {
         retries.set(channel, retryEntry(thread, attemptsSoFar,
           this.holdPlace(thread, reachFrom, waiting?.cursor ?? null), outcome.request, waiting));
       } else {
+        // Commit a backlog skip only after the request handoff and the live
+        // readiness check above. A paused pass must retry from its old cursor
+        // so the skip still produces its notice on recovery.
+        if (outcome.skipCursor !== undefined) {
+          this.state.setPolledHead(`notif:${channel}`, outcome.skipCursor);
+          this.logger.warn('notifications poll: a thread has more new activity than one read takes; it is read from its current update on', { channel });
+        }
         result.failed += 1;
         const place = this.state.polledHead(`notif:${channel}`);
         if (outcome.failure.kind === 'rate-limit') {
@@ -714,6 +721,8 @@ export class NotificationsPoller {
     delivered: NormalizedEvent[];
     duplicates: number;
     failure: ThreadFailure | null;
+    /** A backlog cursor to commit only if the caller does not pause. */
+    skipCursor?: string;
     /** The review request still to deliver, when it wasn't. */
     request?: { id: string; updatedAt: string };
   }> {
@@ -770,17 +779,15 @@ export class NotificationsPoller {
         return { delivered, duplicates, failure: { kind: 'paused', cause: 'host egress is unavailable' }, ...(request ? { request } : {}) };
       }
       if (err instanceof BacklogTooLarge) {
-        // The same read would meet the same cap again: read the thread from its current update on.
-        this.state.setPolledHead(cursorKey, packCursor({ ...cursor, since: err.row.updatedAt }));
-        this.logger.warn('notifications poll: a thread has more new activity than one read takes; it is read from its current update on', {
-          channel,
-        });
+        // The same read would meet the same cap again. Propose the skip, but
+        // let the caller commit it only if this handoff ends without a pause.
         // A review request isn't one of the rows skipped: it still arrives,
         // and one refused waits on a retry entry of its own.
         const refused = await deliver(requestEvent(err.row));
         return {
           delivered,
           duplicates,
+          skipCursor: packCursor({ ...cursor, since: err.row.updatedAt }),
           failure: paused
             ? { kind: 'paused', cause: 'host egress is unavailable' }
             : { kind: 'backlog', cause: 'it had more than 2,000 comments or reviews to read at once' },
@@ -826,7 +833,9 @@ export class NotificationsPoller {
     return {
       delivered,
       duplicates,
-      failure: failure === null ? null : { kind: paused ? 'paused' : 'failed', cause: `the host refused one of its events (${failure})` },
+      failure: failure === null ? null : paused
+        ? { kind: 'paused', cause: 'host egress is unavailable' }
+        : { kind: 'failed', cause: `the host refused one of its events (${failure})` },
       ...(request && requestRefused !== null ? { request } : {}),
     };
   }
@@ -930,7 +939,9 @@ export class NotificationsPoller {
       } catch (err) {
         // Unlike notification-thread retries, persistently refused checks stay
         // on the existing head/TTL schedule, with no retry limit or drop notice.
-        this.logger.warn('notifications: a checks event was refused; it is delivered when its pull request\'s turn comes again', {
+        this.logger.warn(err instanceof HostUnavailable
+          ? 'notifications: a checks event is waiting for host egress; it is delivered when its pull request\'s turn comes again'
+          : 'notifications: a checks event was refused; it is delivered when its pull request\'s turn comes again', {
           key,
           error: err instanceof Error ? err.message : String(err),
         });
