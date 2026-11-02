@@ -15,8 +15,9 @@
  *     GITHUB_PR_BASE_ALLOW, and is refused by name otherwise. An empty
  *     allow-list means no pull request may be opened at all — deny by default.
  *
- * There is deliberately no merge tool and no branch deletion: a clone proposes,
- * a human merges.
+ * There is no merge tool and no branch deletion here: opening a pull request
+ * and landing one are different grants, and the second is github.merge's
+ * (tools-merge.ts), behind its own allow-list, GITHUB_MERGE_BASE_ALLOW.
  */
 
 import {
@@ -205,7 +206,7 @@ export const prTools: ToolDefinition[] = [
     name: TOOL_CREATE_PULL_REQUEST,
     description:
       'Open a pull request. The base branch must be one of the branches GITHUB_PR_BASE_ALLOW ' +
-      'names; any other base is refused. There is no merge tool: a human merges.',
+      'names; any other base is refused. Merging is merge_pull_request (github.merge), granted separately.',
     inputSchema: {
       type: 'object',
       properties: {

@@ -8,7 +8,7 @@
  *
  * What startup does, in order: validate the environment (`readConfig`, which
  * names every offending variable and no secret value), build the GitHub
- * adapter, load the checkpoint store, register the five tool modules, start
+ * adapter, load the checkpoint store, register the seven tool modules, start
  * whichever ingress paths the configuration asks for, and serve.
  *
  * Stdout is the JSON-RPC channel and nothing else writes to it; every
@@ -23,15 +23,17 @@ import { Poller } from './poller.js';
 import { GitHubMcplServer } from './server.js';
 import { GithubState } from './state.js';
 import { commentsToolModule } from './tools-comments.js';
+import { actionsToolModule } from './tools-actions.js';
 import { issuesToolModule, prToolModule } from './tools-issues-pr.js';
+import { mergeToolModule } from './tools-merge.js';
 import { readToolModule } from './tools-read.js';
 import { reviewToolModule } from './tools-review.js';
 import { ConfigError, readConfig, repoSlug, stderrLogger, type Config, type Logger } from './types.js';
 import { WebhookListener, webhookListenerFromConfig } from './webhook.js';
 
 /**
- * The five modules the six feature sets need. `github.events` carries no
- * tools (it is the ingress), so there is no module for it; the other five are
+ * The seven modules the eight feature sets need. `github.events` carries no
+ * tools (it is the ingress), so there is no module for it; the other seven are
  * exactly `TOOLS_BY_FEATURE_SET`'s keys.
  */
 function registerTools(server: GitHubMcplServer): void {
@@ -40,6 +42,8 @@ function registerTools(server: GitHubMcplServer): void {
   server.register(reviewToolModule);
   server.register(issuesToolModule);
   server.register(prToolModule);
+  server.register(mergeToolModule);
+  server.register(actionsToolModule);
 }
 
 /** What `main` has to shut down, in the order it has to shut them down. */
@@ -89,6 +93,8 @@ async function build(config: Config, log: Logger): Promise<{ server: GitHubMcplS
     repos: config.repos,
     maintainers: config.maintainers,
     prBaseAllow: config.prBaseAllow,
+    mergeBaseAllow: config.mergeBaseAllow,
+    workflowAllow: config.workflowAllow,
     state,
     logger: log,
   });
