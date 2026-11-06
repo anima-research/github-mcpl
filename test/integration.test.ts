@@ -141,7 +141,7 @@ const ERR_UNKNOWN_CHECKPOINT = -32005;
 // The handshake
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('the MCPL handshake answers the six feature-set declarations and MCP tools', async (t) => {
+test('the MCPL handshake answers the eight feature-set declarations and MCP tools', async (t) => {
   const h = rig(t);
   const result = await initialize(h, true);
   const manifest = (result.capabilities as { experimental: { mcpl: Record<string, unknown> } }).experimental.mcpl;
@@ -156,6 +156,8 @@ test('the MCPL handshake answers the six feature-set declarations and MCP tools'
     'github.review',
     'github.issues',
     'github.pr',
+    'github.merge',
+    'github.actions',
   ]);
   assert.equal(manifest.pushEvents, true);
   assert.deepEqual(manifest.channels, {
@@ -243,7 +245,7 @@ test('a host that grants nothing gets refusals on every tool, channel and push',
 
   const receipt = await grant(h, []);
   assert.equal(receipt.mode, 'degraded');
-  assert.equal(receipt.unavailableFeatures.length, 6, 'all six disabled');
+  assert.equal(receipt.unavailableFeatures.length, 8, 'all eight disabled');
 
   // Every tool, by name, from every module.
   assert.ok(h.server.toolDefinitions().length >= 20, 'the whole tool surface is registered');
@@ -270,7 +272,7 @@ test('a host that grants nothing gets refusals on every tool, channel and push',
   // "a host has to be able to see the surface it is deciding about" — which
   // was wrong twice over (WP9 review, finding 6): the surface a host decides
   // about is the *manifest's* feature-set declarations, which `initialize`
-  // already carried, and a listing that offers 22 tools while every call is
+  // already carried, and a listing that offers 28 tools while every call is
   // refused is a listing that lies.
   const listed = (await h.host.sendRequest('tools/list', {})) as { tools: { name: string }[] };
   assert.deepEqual(listed.tools, [], 'the empty allowlist offers no tool');
@@ -281,10 +283,10 @@ test('an unknown tool name is refused by name, before the grant is consulted', a
   await initialize(h, true);
   // No grant at all, so a capability answer would be the "available" one —
   // and a typo is still reported as a typo (§ the .9 brief).
-  const unknown = await refusal(callTool(h, 'merge_pull_request', {}));
+  const unknown = await refusal(callTool(h, 'force_push', {}));
   assert.equal(unknown.code, ERR_METHOD_NOT_FOUND);
-  assert.match(unknown.message, /Unknown tool: merge_pull_request/);
-  assert.deepEqual(unknown.data, { tool: 'merge_pull_request' });
+  assert.match(unknown.message, /Unknown tool: force_push/);
+  assert.deepEqual(unknown.data, { tool: 'force_push' });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

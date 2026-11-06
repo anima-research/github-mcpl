@@ -182,6 +182,9 @@ test('readConfig validates a whole environment', () => {
   assert.equal(config.webhookPort, 8443);
   assert.equal(config.pollIntervalMs, 60000);
   assert.deepEqual(config.prBaseAllow, ['dev']);
+  // Merging and workflow dispatch are off unless named.
+  assert.deepEqual(config.mergeBaseAllow, []);
+  assert.deepEqual(config.workflowAllow, []);
   assert.deepEqual(config.maintainers, ['human-one', 'human-two']);
   assert.equal(config.installationId, null);
   // Both files were written with a trailing "\n", as `jq -r` writes them.
@@ -262,6 +265,51 @@ test('readConfig accepts several repositories of one owner, and a per-repository
     /names a repository outside GITHUB_REPOS/,
   );
   assert.match(problems({ GITHUB_REPOS: 'anima-research/rayforce', GITHUB_PR_BASE_ALLOW: 'rayforce:' })[0], /neither a branch nor/);
+});
+
+test('GITHUB_MERGE_BASE_ALLOW and GITHUB_WORKFLOW_ALLOW parse like the base allow-list', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'github-mcpl-'));
+  const pem = join(dir, 'app.pem');
+  writeFileSync(pem, 'NOT-A-REAL-KEY placeholder for tests\n', { mode: 0o600 });
+  const base = {
+    GITHUB_APP_ID: '12345',
+    GITHUB_APP_PRIVATE_KEY_FILE: pem,
+    GITHUB_BOT_LOGIN: 'rayforce-clone[bot]',
+    GITHUB_REPOS: 'anima-research/rayforce, anima-research/chronicle',
+  };
+  const config = readConfig({
+    ...base,
+    GITHUB_MERGE_BASE_ALLOW: 'main, anima-research/rayforce:dev',
+    GITHUB_WORKFLOW_ALLOW: 'review.yml, anima-research/chronicle:ci.yaml',
+  });
+  assert.deepEqual(allowedBases(TEST_REPO, config.mergeBaseAllow), ['main', 'dev']);
+  assert.deepEqual(allowedBases({ owner: 'anima-research', name: 'chronicle' }, config.mergeBaseAllow), ['main']);
+  assert.deepEqual(allowedBases(TEST_REPO, config.workflowAllow), ['review.yml']);
+  assert.deepEqual(allowedBases({ owner: 'anima-research', name: 'chronicle' }, config.workflowAllow), [
+    'review.yml',
+    'ci.yaml',
+  ]);
+
+  const problems = (env: Record<string, string>): string[] => {
+    try {
+      readConfig({ ...base, ...env });
+    } catch (err) {
+      assert.ok(err instanceof ConfigError);
+      return err.problems;
+    }
+    assert.fail('expected a ConfigError');
+  };
+  assert.match(problems({ GITHUB_MERGE_BASE_ALLOW: 'other-org/x:main' })[0], /^GITHUB_MERGE_BASE_ALLOW: .*outside GITHUB_REPOS/);
+  assert.match(problems({ GITHUB_WORKFLOW_ALLOW: 'anima-research/gate:ci.yml' })[0], /^GITHUB_WORKFLOW_ALLOW: .*outside GITHUB_REPOS/);
+  // A workflow is named by its file, so a path, an id or a name is a startup error.
+  for (const bad of ['.github/workflows/ci.yml', '12345', 'Review', 'ci.yml.bak']) {
+    assert.match(problems({ GITHUB_WORKFLOW_ALLOW: bad })[0], /not a workflow file name/, bad);
+  }
+  // A malformed scoped entry is described as what the list holds: files, not branches.
+  assert.match(
+    problems({ GITHUB_WORKFLOW_ALLOW: 'anima-research/rayforce:' })[0],
+    /^GITHUB_WORKFLOW_ALLOW: "anima-research\/rayforce:" is neither a workflow file nor owner\/name:workflow file$/,
+  );
 });
 
 test('readConfig names every problem at once', () => {
@@ -346,8 +394,10 @@ test('every tool belongs to exactly one feature set', () => {
       assert.equal(featureSetForTool(tool), featureSet);
     }
   }
-  assert.equal(seen.size, 22);
-  assert.equal(featureSetForTool('merge_pull_request'), undefined);
+  assert.equal(seen.size, 28);
+  assert.equal(featureSetForTool('merge_pull_request'), 'github.merge');
+  assert.equal(featureSetForTool('dispatch_workflow'), 'github.actions');
+  assert.equal(featureSetForTool('force_push'), undefined);
 });
 
 test('the tag vocabulary is the contract\'s', () => {
