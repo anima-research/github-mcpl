@@ -1,5 +1,5 @@
 /**
- * Channels (TASK-SRHKG.1.5): registration, the label bound, incoming shape and
+ * Channels: registration, the label bound, incoming shape and
  * thread-id rules, publish routing, refusals, typing.
  *
  * Both seams the package declares are exercised for real:
@@ -7,9 +7,8 @@
  *   - the host, over a `McplConnection` pair, so every descriptor and every
  *     incoming message is actually serialized to JSON-RPC and parsed back on
  *     the host side before it is asserted on (the same fake-host wiring
- *     test/harness.ts uses, kept here because the .1 skeleton's server does
- *     not route channel methods yet — .9 does that, and `harness()` then
- *     drives this module through the server);
+ *     test/harness.ts uses, kept here so this module is tested on its own;
+ *     `harness()` drives it through the server);
  *   - GitHub, through the harness's {@link FakeGitHubApi}: no network, and the
  *     call log is what publish routing is asserted against.
  */
@@ -204,7 +203,7 @@ function metadata(partial: Partial<EventMetadata> = {}): EventMetadata {
     kind: 'issue',
     actor: 'human-one',
     sha: null,
-    htmlUrl: 'https://github.com/anima-research/rayforce/issues/7',
+    htmlUrl: 'https://github.com/anima-research/example-repo/issues/7',
     ...partial,
   };
 }
@@ -218,7 +217,7 @@ function event(partial: Partial<NormalizedEvent> = {}): NormalizedEvent {
     thread: ISSUE,
     actor: { login: 'human-one', isBot: false },
     body: 'ping',
-    html_url: 'https://github.com/anima-research/rayforce/issues/7#issuecomment-1',
+    html_url: 'https://github.com/anima-research/example-repo/issues/7#issuecomment-1',
     ...partial,
   };
 }
@@ -244,11 +243,11 @@ test('registration is lazy: nothing is announced until a thread is touched', asy
   assert.equal(params.channels.length, 1, 'only the touched thread');
   const sent = assertValidDescriptor(params.channels[0]);
 
-  assert.equal(sent.id, 'github:anima-research/rayforce#7');
+  assert.equal(sent.id, 'github:anima-research/example-repo#7');
   assert.equal(sent.type, 'github');
   assert.equal(sent.direction, 'bidirectional');
-  assert.equal(sent.label, 'anima-research/rayforce#7: Thread safety of the scheduler');
-  assert.deepEqual(sent.address, { owner: 'anima-research', name: 'rayforce', number: 7, kind: 'issue' });
+  assert.equal(sent.label, 'anima-research/example-repo#7: Thread safety of the scheduler');
+  assert.deepEqual(sent.address, { owner: 'anima-research', name: 'example-repo', number: 7, kind: 'issue' });
   assert.deepEqual(sent.metadata, { kind: 'issue', state: 'open' });
 
   assert.deepEqual(reg.list().map((d) => d.id), [sent.id]);
@@ -302,7 +301,7 @@ test("a registration still in flight does not swallow the next touch's title and
   release();
 
   const [registered, delivered] = await Promise.all([first, second]);
-  assert.equal(registered?.label, 'anima-research/rayforce#7', 'registered before any title was known');
+  assert.equal(registered?.label, 'anima-research/example-repo#7', 'registered before any title was known');
   assert.equal(delivered.delivered, true);
   assert.equal(host.sent(method.CHANNELS_REGISTER).length, 1, 'still announced once');
 
@@ -310,7 +309,7 @@ test("a registration still in flight does not swallow the next touch's title and
   assert.equal(changed.length, 1, "the racing event's title and state reach the host");
   const updated = assertValidDescriptor((changed[0].params as { updated: unknown[] }).updated[0]);
   assert.equal(updated.id, id);
-  assert.equal(updated.label, 'anima-research/rayforce#7: Closed with a title');
+  assert.equal(updated.label, 'anima-research/example-repo#7: Closed with a title');
   assert.deepEqual(updated.metadata, { kind: 'issue', state: 'closed' });
 
   assert.equal(reg.get(id)?.label, updated.label, 'and the registry holds them too');
@@ -329,7 +328,7 @@ test('the first event registers the channel, with the event title', async () => 
   );
   assert.equal(outcome.delivered, true);
   const params = host.sent(method.CHANNELS_REGISTER)[0].params as ChannelsRegisterParams;
-  assert.equal(params.channels[0].label, 'anima-research/rayforce#7: Scheduler deadlock');
+  assert.equal(params.channels[0].label, 'anima-research/example-repo#7: Scheduler deadlock');
   host.close();
 });
 
@@ -338,13 +337,13 @@ test('a tool touch with no title yet labels the channel without one, and the fir
   const reg = registry(host);
   await reg.ensureChannel(ISSUE);
   const registered = (host.sent(method.CHANNELS_REGISTER)[0].params as ChannelsRegisterParams).channels[0];
-  assert.equal(registered.label, 'anima-research/rayforce#7', 'no trailing colon for an unknown title');
+  assert.equal(registered.label, 'anima-research/example-repo#7', 'no trailing colon for an unknown title');
 
   await reg.deliver(event({ kind: 'issue.edited', title: 'Now it has a title' }), [], metadata(), TEXT);
   const changed = host.sent(method.CHANNELS_CHANGED);
   assert.equal(changed.length, 1);
   const updated = (changed[0].params as { updated: ChannelDescriptor[] }).updated[0];
-  assert.equal(updated.label, 'anima-research/rayforce#7: Now it has a title');
+  assert.equal(updated.label, 'anima-research/example-repo#7: Now it has a title');
   host.close();
 });
 
@@ -374,7 +373,7 @@ test('the label title is bounded to 80 chars, notice included', async () => {
   await reg.ensureChannel(ISSUE, title);
 
   const sent = (host.sent(method.CHANNELS_REGISTER)[0].params as ChannelsRegisterParams).channels[0];
-  const prefix = 'anima-research/rayforce#7: ';
+  const prefix = 'anima-research/example-repo#7: ';
   assert.ok(sent.label.startsWith(prefix));
   const titlePart = sent.label.slice(prefix.length);
   assert.equal(titlePart.length, LIMITS.titleChars, 'exactly 80 chars of title');
@@ -395,8 +394,8 @@ test('a title change sends channels/changed with the new label', async () => {
   const changed = host.sent(method.CHANNELS_CHANGED);
   assert.equal(changed.length, 1);
   const updated = assertValidDescriptor((changed[0].params as { updated: unknown[] }).updated[0]);
-  assert.equal(updated.id, 'github:anima-research/rayforce#7');
-  assert.equal(updated.label, 'anima-research/rayforce#7: Second title');
+  assert.equal(updated.id, 'github:anima-research/example-repo#7');
+  assert.equal(updated.label, 'anima-research/example-repo#7: Second title');
   assert.deepEqual(updated.metadata, { kind: 'issue', state: 'open' });
   assert.equal(reg.get(updated.id)?.label, updated.label, 'the registry holds the new descriptor');
   host.close();
@@ -430,14 +429,14 @@ test('a channels/changed the host refuses leaves the acknowledged descriptor in 
   const reg = registry(host);
   const id = channelId(ISSUE);
   await reg.ensureChannel(ISSUE, 'First title');
-  assert.equal(reg.get(id)?.label, 'anima-research/rayforce#7: First title');
+  assert.equal(reg.get(id)?.label, 'anima-research/example-repo#7: First title');
 
   host.refuse.add(id);
   await reg.ensureChannel(ISSUE, 'Second title');
   assert.equal(host.sent(method.CHANNELS_CHANGED).length, 1, 'the update was sent');
   assert.equal(
     reg.get(id)?.label,
-    'anima-research/rayforce#7: First title',
+    'anima-research/example-repo#7: First title',
     'the registry reports what the host acknowledged, not what it was told',
   );
 
@@ -448,9 +447,9 @@ test('a channels/changed the host refuses leaves the acknowledged descriptor in 
   assert.equal(changed.length, 2, 'a refused update stays retryable');
   assert.equal(
     (changed[1].params as { updated: ChannelDescriptor[] }).updated[0].label,
-    'anima-research/rayforce#7: Second title',
+    'anima-research/example-repo#7: Second title',
   );
-  assert.equal(reg.get(id)?.label, 'anima-research/rayforce#7: Second title');
+  assert.equal(reg.get(id)?.label, 'anima-research/example-repo#7: Second title');
 
   // Acknowledged now: a further touch owes nothing.
   await reg.ensureChannel(ISSUE);
@@ -468,7 +467,7 @@ test('a channels/changed that errors in transport stays retryable', async () => 
   // A host error on a label update is logged, not thrown: the channel works.
   await reg.ensureChannel(ISSUE, 'Second title');
   assert.equal(host.sent(method.CHANNELS_CHANGED).length, 1);
-  assert.equal(reg.get(id)?.label, 'anima-research/rayforce#7: First title', 'the cache did not advance');
+  assert.equal(reg.get(id)?.label, 'anima-research/example-repo#7: First title', 'the cache did not advance');
 
   host.errorOn.clear();
   await reg.ensureChannel(ISSUE);
@@ -476,9 +475,9 @@ test('a channels/changed that errors in transport stays retryable', async () => 
   assert.equal(changed.length, 2, 'the update is sent again');
   assert.equal(
     (changed[1].params as { updated: ChannelDescriptor[] }).updated[0].label,
-    'anima-research/rayforce#7: Second title',
+    'anima-research/example-repo#7: Second title',
   );
-  assert.equal(reg.get(id)?.label, 'anima-research/rayforce#7: Second title');
+  assert.equal(reg.get(id)?.label, 'anima-research/example-repo#7: Second title');
   host.close();
 });
 
@@ -504,7 +503,7 @@ test('incoming carries the contract shape: sender, timestamp, tags, metadata', a
   const outcome = await reg.deliver(event({ id: 'delivery-42' }), tags, meta, TEXT);
   assert.deepEqual(outcome, {
     delivered: true,
-    channelId: 'github:anima-research/rayforce#7',
+    channelId: 'github:anima-research/example-repo#7',
     messageId: 'delivery-42',
     threadId: undefined,
   });
@@ -515,7 +514,7 @@ test('incoming carries the contract shape: sender, timestamp, tags, metadata', a
   assert.equal(params.messages.length, 1);
   const message = assertValidIncoming(params.messages[0]);
 
-  assert.equal(message.channelId, 'github:anima-research/rayforce#7');
+  assert.equal(message.channelId, 'github:anima-research/example-repo#7');
   assert.equal(message.messageId, 'delivery-42', 'the event id is the message id');
   assert.equal(message.timestamp, '2026-10-14T09:00:00.000Z', 'receivedAt is the timestamp');
   assert.deepEqual(message.author, { id: 'human-one', name: 'human-one' });
@@ -620,7 +619,7 @@ test('deliver puts the thread id on the incoming message', async () => {
   assert.equal(outcome.threadId, 'rt:555');
   const params = host.sent(method.CHANNELS_INCOMING)[0].params as ChannelsIncomingParams;
   assert.equal(params.messages[0].threadId, 'rt:555');
-  assert.equal(params.messages[0].channelId, 'github:anima-research/rayforce#12');
+  assert.equal(params.messages[0].channelId, 'github:anima-research/example-repo#12');
   host.close();
 });
 
@@ -667,7 +666,7 @@ test('publish without a threadId creates a comment and reports the created id', 
   assert.equal(outcome.isReviewComment, false);
   assert.equal(typeof outcome.commentId, 'number');
   assert.equal(outcome.messageId, String(outcome.commentId));
-  assert.ok(outcome.htmlUrl?.startsWith('https://github.com/anima-research/rayforce/'));
+  assert.ok(outcome.htmlUrl?.startsWith('https://github.com/anima-research/example-repo/'));
   assert.deepEqual(outcome.thread, ISSUE);
   host.close();
 });
@@ -776,7 +775,7 @@ test('publishing to an unknown channel is refused with -32023', async () => {
     reg.handlePublish(
       {
         conversationId: 'c',
-        channelId: 'github:anima-research/rayforce#999',
+        channelId: 'github:anima-research/example-repo#999',
         content: [{ type: 'text', text: 'hi' }],
       },
       api,
@@ -861,7 +860,7 @@ test('typing is a no-op that answers success', async () => {
   const before = host.saw.length;
 
   assert.deepEqual(reg.handleTyping({ channelId: channelId(ISSUE) }), {});
-  assert.deepEqual(reg.handleTyping({ channelId: 'github:anima-research/rayforce#999' }), {}, 'no refusal either');
+  assert.deepEqual(reg.handleTyping({ channelId: 'github:anima-research/example-repo#999' }), {}, 'no refusal either');
   assert.equal(host.saw.length, before, 'nothing is written anywhere');
   host.close();
 });

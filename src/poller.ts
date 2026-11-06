@@ -1,5 +1,5 @@
 /**
- * Polling ingress (TASK-SRHKG.1.3, §Ingress, as amended by contract
+ * Polling ingress (§Ingress, as amended by contract
  * amendment 1).
  *
  * The contract's first draft polled `GET /notifications`; an App installation

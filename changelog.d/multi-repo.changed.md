@@ -5,6 +5,6 @@
   are required instead of defaulting, so a call can never land in the wrong
   one.
 - `GITHUB_PR_BASE_ALLOW` entries can be scoped: `branch` applies to every
-  repository, `owner/name:branch` to that one (`anima-research/rayforce:dev,main`).
+  repository, `owner/name:branch` to that one (`my-org/app:dev,main`).
   A scoped entry naming a repository outside `GITHUB_REPOS` is refused at
   startup; a refusal names the branches allowed on that repository.

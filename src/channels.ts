@@ -1,5 +1,5 @@
 /**
- * Channels (TASK-SRHKG.1.5) — one MCPL channel per issue or pull request.
+ * Channels — one MCPL channel per issue or pull request.
  *
  * The contract's channel bullets, and nothing beyond them:
  *
@@ -22,7 +22,7 @@
  *     thread closes or reopens. What the registry reports is what the host
  *     *acknowledged*: a refused or undelivered update leaves the descriptor
  *     where it was and is retried on the channel's next touch.
- *   - **Incoming.** {@link ChannelRegistry.deliver} takes the outputs of .4
+ *   - **Incoming.** {@link ChannelRegistry.deliver} takes two outputs
  *     (`tagsFor` → tags + metadata, `renderEvent` → content) and sends one
  *     `channels/incoming` message, with the contract's thread-id rules, after
  *     asking {@link ChannelRegistryOptions.canDeliver} — the registration it
@@ -35,9 +35,9 @@
  * declared for this server, so nothing here implements them.
  *
  * The host connection is reached through {@link HostConnection}, a one-method
- * seam this module defines, so .9 can hand in an `McplConnection` and a test
- * can hand in a recorder. Stdout belongs to JSON-RPC; every diagnostic goes
- * through the {@link Logger}, which writes to stderr.
+ * seam this module defines, so server.ts can hand in an `McplConnection` and a
+ * test can hand in a recorder. Stdout belongs to JSON-RPC; every diagnostic
+ * goes through the {@link Logger}, which writes to stderr.
  */
 
 import {

@@ -252,8 +252,9 @@ folded into a version section at release time.
   wrapper and its sudo rule, reverse proxy / Cloudflare tunnel /
   polling-only ingress with what polling cannot see, smee for a laptop
   test, log hygiene), two host recipes in `examples/` with wake policies
-  sized for GitHub's event volume, and `docs/rayforce-house-rules.md` for
-  the target repository's practices.
+  sized for GitHub's event volume, and a house-rules note for the first
+  target repository's practices (removed after 0.1.0; such notes belong
+  with the host's deployment).
 
 - **One server.** `src/server.ts` (`GitHubMcplServer`) joins the seven
   packages into a single connection, and `src/index.ts` starts it: the MCPL

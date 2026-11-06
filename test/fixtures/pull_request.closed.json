@@ -7,7 +7,7 @@
     "state": "closed",
     "title": "fix(scheduler): dispatch the final batch",
     "body": "Closes #41. Adds a drain check before the tick returns.",
-    "user": { "login": "rayforce-clone[bot]", "id": 9001, "type": "Bot" },
+    "user": { "login": "example-agent[bot]", "id": 9001, "type": "Bot" },
     "draft": false,
     "merged": true,
     "mergeable": null,
@@ -18,9 +18,9 @@
     "head": { "ref": "fix-final-batch", "sha": "4d7b2e8c1a93f05627de4b1c8a0f3927e5c6d418" },
     "base": { "ref": "dev", "sha": "9ab3c1d7e5f20418b6c93d7a2e1f08c4d6b5a397" },
     "requested_reviewers": [],
-    "html_url": "https://github.com/anima-research/rayforce/pull/58"
+    "html_url": "https://github.com/anima-research/example-repo/pull/58"
   },
-  "repository": { "id": 100200300, "name": "rayforce", "full_name": "anima-research/rayforce", "private": true, "owner": { "login": "anima-research", "id": 4001, "type": "Organization" }, "html_url": "https://github.com/anima-research/rayforce", "default_branch": "dev" },
+  "repository": { "id": 100200300, "name": "example-repo", "full_name": "anima-research/example-repo", "private": true, "owner": { "login": "anima-research", "id": 4001, "type": "Organization" }, "html_url": "https://github.com/anima-research/example-repo", "default_branch": "dev" },
   "sender": { "login": "octocat", "id": 1001, "type": "User" },
   "installation": { "id": 70000001 }
 }

@@ -11,7 +11,7 @@
  *   -32602 Invalid params
  *
  * Copied from slack-mcpl's src/errors.ts (protocol-generic; no Slack-specific
- * logic). grant.ts needs it, so it lands with the .1 skeleton.
+ * logic). grant.ts needs it.
  */
 
 import { ERR_CAPABILITY_DENIED } from '@animalabs/mcpl-core';

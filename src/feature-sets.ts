@@ -1,5 +1,5 @@
 /**
- * Feature-set declarations — MCPL 0.5 (SPEC §5.1, §6.1, §6.2), TASK-SRHKG.1.6.
+ * Feature-set declarations — MCPL 0.5 (SPEC §5.1, §6.1, §6.2).
  *
  * Six feature sets, exactly as the contract's "Feature sets and tools" section
  * names them:
@@ -21,22 +21,22 @@
  * justified by a call site rather than by aspiration:
  *
  *   tools              — every set with tools; the MCP tool surface (§5.1).
- *   pushEvents         — the pipeline sends push/event for every event (.9),
- *                        and it is the *only* path github.events declares: see
- *                        {@link EVENTS_USES}.
+ *   pushEvents         — the pipeline sends push/event for every event
+ *                        (server.ts), and it is the *only* path github.events
+ *                        declares: see {@link EVENTS_USES}.
  *   channels.publish   — channels/publish writes a comment or a review reply
- *                        (.5 over the comment API), which is what
+ *                        (channels.ts over the comment API), which is what
  *                        github.comments authorizes; a host that disables
  *                        github.comments must not get a write through publish,
  *                        so the path is declared there and not on github.events.
  *
  * The other three channel paths this server uses — `channels.register` (the
- * registry announces a thread lazily, .5), `channels.lifecycle` (channels/open
- * and channels/close) and `channels.incoming` (an event delivered to its
- * channel) — are declared by no feature set and checked at their own call
- * sites instead. They are capabilities the server *uses when it has them*, not
- * capabilities any set needs to function, and §6.4 would otherwise make the
- * whole of github.events depend on all of them (WP9 review, finding 4).
+ * registry announces a thread lazily, channels.ts), `channels.lifecycle`
+ * (channels/open and channels/close) and `channels.incoming` (an event
+ * delivered to its channel) — are declared by no feature set and checked at
+ * their own call sites instead. They are capabilities the server *uses when it
+ * has them*, not capabilities any set needs to function, and §6.4 would
+ * otherwise make the whole of github.events depend on all of them.
  * `channels.typing` is answered as a no-op behind the same per-call check.
  *
  * Deliberately NOT declared: channels.streaming (a comment is posted once),

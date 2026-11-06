@@ -1,5 +1,5 @@
 /**
- * Event tags and wake metadata (TASK-SRHKG.1.4; contract section "Tags and
+ * Event tags and wake metadata (contract section "Tags and
  * metadata"; MCPL RFC-001).
  *
  * Pure functions: `tagsFor(event, ctx)` takes a `NormalizedEvent` and what the

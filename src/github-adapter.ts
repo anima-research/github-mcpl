@@ -1,6 +1,6 @@
 /**
  * GitHubAdapter — the only module in the package that touches octokit
- * (TASK-SRHKG.1 Contract, module map; work package .2).
+ * (the contract's module map).
  *
  * Three concerns live here and nothing else does:
  *
