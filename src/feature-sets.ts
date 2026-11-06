@@ -1,8 +1,8 @@
 /**
  * Feature-set declarations — MCPL 0.5 (SPEC §5.1, §6.1, §6.2), TASK-SRHKG.1.6.
  *
- * Six feature sets, exactly as the contract's "Feature sets and tools" section
- * names them:
+ * Eight feature sets: the six of the contract's "Feature sets and tools"
+ * section, and the two added after it (merge, actions):
  *
  *   github.events   — ingress: push/event and channels/incoming. No tools.
  *   github.read     — the read tools (tools-read.ts).
@@ -10,6 +10,9 @@
  *   github.review   — create_review, resolve_thread, unresolve_thread.
  *   github.issues   — create_issue, edit_issue, close_issue, reopen_issue.
  *   github.pr       — create_pull_request, edit_pull_request, request_review.
+ *   github.merge    — merge_pull_request, update_branch (tools-merge.ts).
+ *   github.actions  — list_workflow_runs, dispatch_workflow, rerun_workflow_run
+ *                     (tools-actions.ts).
  *
  * Which tool belongs to which set is not restated here: `TOOLS_BY_FEATURE_SET`
  * in types.ts is the single answer, and `ROLLBACK_CAPABLE` the single answer to
@@ -54,12 +57,14 @@ import type {
   TreatmentRule,
 } from '@animalabs/mcpl-core';
 import {
+  ACTIONS_FEATURE_SET,
   COMMENTS_FEATURE_SET,
   CORE_TAGS,
   EVENTS_FEATURE_SET,
   FEATURE_SETS,
   GITHUB_TAGS,
   ISSUES_FEATURE_SET,
+  MERGE_FEATURE_SET,
   PR_FEATURE_SET,
   READ_FEATURE_SET,
   REVIEW_FEATURE_SET,
@@ -84,6 +89,7 @@ const GITHUB_TAG_DESCRIPTIONS: Record<string, string> = {
   'github:actor': 'Who acted, where the deployment distinguishes them (maintainer).',
   'github:review-comment': 'A comment on a line of a diff, inside a review thread.',
   'github:push': 'Commits were pushed to a branch.',
+  'github:read-failed': 'Contributor mode stopped reading a thread, and says why.',
 };
 
 /** Tag families whose value domain is ordered within this namespace. */
@@ -181,8 +187,8 @@ const DESCRIPTIONS: Record<FeatureSetName, string> = {
     'reviews, review comments, check results and pushes — as events and as channel ' +
     'deliveries. Carries no tools.',
   [READ_FEATURE_SET]:
-    'Read issues, pull requests, comments, review threads, changed files, check runs and ' +
-    'search results from the allowed repository. No writes.',
+    'Read issues, pull requests, comments, review threads, submitted reviews, changed files, ' +
+    'check runs and search results from the allowed repository. No writes.',
   [COMMENTS_FEATURE_SET]:
     'Write comments on issues and pull requests: a new comment, a reply inside a review ' +
     'thread, an edit or delete of the bot’s own comment, and a sticky comment kept ' +
@@ -196,11 +202,18 @@ const DESCRIPTIONS: Record<FeatureSetName, string> = {
     'first) and reopen it.',
   [PR_FEATURE_SET]:
     'Open a pull request against an allowed base branch, edit its title, body, base or ' +
-    'draft state, and request reviewers. Merging and branch deletion are not offered.',
+    'draft state, and request reviewers. Merging is github.merge, granted separately.',
+  [MERGE_FEATURE_SET]:
+    'Merge a pull request into a base branch GITHUB_MERGE_BASE_ALLOW names (none by default), at ' +
+    'the head sha the caller read, by merge, squash or rebase, optionally deleting the merged ' +
+    'head branch; and bring a pull request branch up to date with its base. A merge cannot be undone.',
+  [ACTIONS_FEATURE_SET]:
+    'List GitHub Actions workflow runs; dispatch a workflow GITHUB_WORKFLOW_ALLOW names (none by ' +
+    'default) on a base branch, with inputs; and re-run such a run, all jobs or only the failed ones.',
 };
 
 /**
- * The six declarations, keyed by feature-set name (§6.1).
+ * The eight declarations, keyed by feature-set name (§6.1).
  *
  * `rollback` is derived from `ROLLBACK_CAPABLE` rather than written out, and it
  * is stated explicitly (including `false`) so a host reads a decision rather
