@@ -11,13 +11,14 @@
  * granting github.pr: opening a pull request and landing one are different
  * decisions. Not rollback-capable — a merge cannot be unmerged.
  *
- * The refusals are the point of this file, and all of them are taken before
- * GitHub is asked:
+ * The refusals are the point of this file, and each is taken before GitHub is
+ * asked for the write it guards:
  *
  *   - the base must be in GITHUB_MERGE_BASE_ALLOW, which is empty by default:
  *     a deployment that never set it cannot merge anything, whatever the host
  *     grants;
- *   - a draft, a closed or an already-merged pull request is refused by name;
+ *   - a closed or an already-merged pull request is refused by name, and a
+ *     draft is refused when merging;
  *   - with `sha` (full, or a prefix of 7 or more hex digits), a head that has
  *     moved since the caller read it is refused — a merge only ever lands the
  *     commit somebody looked at (GitHub enforces the full sha again, with a
@@ -27,8 +28,10 @@
  *     protected on GitHub, the default branch, or the base of another open
  *     pull request;
  *   - `update_branch` writes a merge commit onto the head branch, so it takes
- *     the same fences as a merge — an open pull request into an allowed base —
- *     and refuses a head that is itself a base branch.
+ *     the allowed base, the open pull request and the head sha from a merge's
+ *     fences, though not the draft, and writes only to a head branch of the
+ *     pull request's own repository that is nobody's base, judged as for
+ *     `delete_branch`.
  *
  * Branch protection — required checks, required approvals, linear history —
  * is GitHub's to enforce, and its refusal (405) comes back as it is.
@@ -41,7 +44,6 @@ import {
   TOOL_UPDATE_BRANCH,
   allowedBases,
   repoSlug,
-  sameRepo,
   type MergeMethod,
   type PullRequest,
   type RepoRef,
@@ -95,6 +97,15 @@ function notMergeable(pr: PullRequest, action: 'merging' | 'updating'): string |
   return null;
 }
 
+/**
+ * Whether two references name one repository. GitHub's owner and repository
+ * names are case-insensitive, and a pull request's own repository keeps the
+ * spelling GITHUB_REPOS gave it while its head repository has GitHub's.
+ */
+function sameRepository(a: RepoRef, b: RepoRef): boolean {
+  return a.owner.toLowerCase() === b.owner.toLowerCase() && a.name.toLowerCase() === b.name.toLowerCase();
+}
+
 /** A sha as a caller may pass one: 7 to 40 hex digits, any case. */
 const SHA_PREFIX = /^[0-9a-f]{7,40}$/;
 
@@ -134,13 +145,13 @@ function baseBranches(pr: PullRequest, ctx: ToolContext): Set<string> {
  * Whether the merged head branch may be deleted, as far as the pull request
  * itself can tell, and if not, why not. Only a branch of the base repository
  * itself — a fork's branch is its owner's — and never a branch an allow-list
- * names as a base. {@link deletionBlockedOnGitHub} asks GitHub the rest.
+ * names as a base. {@link baseOnGitHub} asks GitHub the rest.
  */
 function branchDeletionBlocked(pr: PullRequest, ctx: ToolContext): string | null {
   const branch = pr.head.ref;
   if (!branch) return 'the pull request names no head branch';
   if (!pr.headRepo) return 'GitHub no longer knows the head repository (a deleted fork?)';
-  if (!sameRepo(pr.headRepo, pr.repo)) {
+  if (!sameRepository(pr.headRepo, pr.repo)) {
     return `the head branch lives in ${field(repoSlug(pr.headRepo), FIELD.slug)}, not in ${repoSlug(pr.repo)}`;
   }
   if (baseBranches(pr, ctx).has(branch)) {
@@ -150,13 +161,15 @@ function branchDeletionBlocked(pr: PullRequest, ctx: ToolContext): string | null
 }
 
 /**
- * The part of "is this somebody's base?" only GitHub knows. A release branch
- * kept *out* of the allow-lists — so that nothing here can target it — is
- * still a base: a back-merge `release → dev` must not delete `release`. So a
- * protected branch, the default branch, and a branch other open pull requests
- * target are all kept.
+ * The part of "is this somebody's base?" only GitHub knows, and why, or null.
+ * A release branch kept *out* of the allow-lists — so that nothing here can
+ * target it — is still a base, which a back-merge `release → dev` should
+ * neither delete nor write into. GitHub can tell when the branch is protected,
+ * is the default branch, or is the base of another open pull request; an
+ * unprotected branch that isn't the default and that nothing targets reads as
+ * nobody's base.
  */
-function deletionBlockedOnGitHub(branch: string, facts: BranchFacts): string | null {
+function baseOnGitHub(branch: string, facts: BranchFacts): string | null {
   if (facts.isDefault) return `${echo(branch)} is the repository's default branch`;
   if (facts.protected) return `${echo(branch)} is protected on GitHub`;
   if (facts.openPullsBasedOn > 0) return `${echo(branch)} is the base of another open pull request`;
@@ -202,9 +215,10 @@ export const mergeTools: ToolDefinition[] = [
     name: TOOL_UPDATE_BRANCH,
     description:
       'Bring a pull request’s head branch up to date by merging its base into it (GitHub’s ' +
-      '"Update branch"). Only an open pull request into a base GITHUB_MERGE_BASE_ALLOW names, and never ' +
-      'when the head is itself a base branch. GitHub does the merge in the background; the head sha ' +
-      'changes when it lands. With `sha`, a head that has moved is refused.',
+      '"Update branch"). Only an open pull request into a base GITHUB_MERGE_BASE_ALLOW names, and only ' +
+      'when the head is a branch of this repository that is nobody’s base: not allow-listed, not protected, ' +
+      'not the default branch, not the base of another open pull request. GitHub does the merge in the ' +
+      'background; the head sha changes when it lands. With `sha`, a head that has moved is refused.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -255,7 +269,7 @@ async function callMerge(name: string, args: Record<string, unknown>, ctx: ToolC
           out.push(`head branch kept: ${why}`);
         } else {
           try {
-            const onGitHub = deletionBlockedOnGitHub(pr.head.ref, await ctx.api.branchFacts(pull.repo, pr.head.ref));
+            const onGitHub = baseOnGitHub(pr.head.ref, await ctx.api.branchFacts(pull.repo, pr.head.ref));
             if (onGitHub) {
               out.push(`head branch kept: ${onGitHub}`);
             } else {
@@ -274,11 +288,23 @@ async function callMerge(name: string, args: Record<string, unknown>, ctx: ToolC
       const expected = optionalString(args, 'sha');
       // A merge commit onto the head branch is a write, so it takes a merge's
       // fences: an open pull request into an allowed base, and a head that is
-      // not itself a base (on `dev → main`, this would merge main into dev).
+      // nobody's base (on `dev → main`, this would merge main into dev). The
+      // head must be a branch of this repository: a write lands only in
+      // GITHUB_REPOS, and a fork's branch is its owner's.
       const pr = await ctx.api.getPullRequest(pull);
       const blocked = notMergeable(pr, 'updating');
       if (blocked) refuse(blocked);
       requireMergeBase(pr.base.ref, pull.repo, ctx);
+      if (!pr.headRepo) {
+        refuse(`GitHub no longer knows the head repository of ${repoSlug(pull.repo)}#${pull.number} (a deleted fork?)`);
+      }
+      if (!sameRepository(pr.headRepo, pr.repo)) {
+        refuse(
+          `the head branch of ${repoSlug(pull.repo)}#${pull.number} lives in ` +
+            `${field(repoSlug(pr.headRepo), FIELD.slug)}, not in ${repoSlug(pr.repo)}; update_branch writes only ` +
+            `to a branch of the pull request's own repository`,
+        );
+      }
       if (baseBranches(pr, ctx).has(pr.head.ref)) {
         refuse(
           `the head of ${repoSlug(pull.repo)}#${pull.number}, ${echo(pr.head.ref)}, is a base branch here ` +
@@ -286,6 +312,24 @@ async function callMerge(name: string, args: Record<string, unknown>, ctx: ToolC
         );
       }
       if (expected !== undefined) requireHeadSha(expected, pr);
+      // The rest of "is the head somebody's base?" is GitHub's to say, as for
+      // delete_branch. A head GitHub can't be asked about is not written to.
+      let facts: BranchFacts;
+      try {
+        facts = await ctx.api.branchFacts(pull.repo, pr.head.ref);
+      } catch (err) {
+        refuse(
+          `couldn't ask GitHub whether ${echo(pr.head.ref)} is a base ` +
+            `(${describeFailure('branchFacts', err)}); nothing was written`,
+        );
+      }
+      const onGitHub = baseOnGitHub(pr.head.ref, facts);
+      if (onGitHub) {
+        refuse(
+          `the head of ${repoSlug(pull.repo)}#${pull.number} is a base on GitHub: ${onGitHub}; ` +
+            `update_branch never writes to one`,
+        );
+      }
       await ctx.api.updatePullRequestBranch(pull, pr.head.sha);
       return toolResult(
         `asked GitHub to merge ${field(pr.base.ref)} into ${field(pr.head.ref)} ` +

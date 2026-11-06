@@ -384,9 +384,9 @@ export interface ReviewList {
 }
 
 /**
- * What GitHub knows about a branch that bears on deleting it: a protected
- * branch, the default branch, or a branch other open pull requests target is
- * somebody's base, whatever the allow-lists say.
+ * What GitHub knows about a branch that bears on deleting it or writing into
+ * it: a protected branch, the default branch, or a branch other open pull
+ * requests target is somebody's base, whatever the allow-lists say.
  */
 export interface BranchFacts {
   protected: boolean;
@@ -616,7 +616,7 @@ export interface GitHubApi {
   updatePullRequestBranch(pull: ThreadRef, expectedHeadSha?: string): Promise<void>;
   /** Delete `refs/heads/<branch>` in `repo`. */
   deleteBranch(repo: RepoRef, branch: string): Promise<void>;
-  /** What decides whether a merged head branch may be deleted. */
+  /** What decides whether a merged head branch may be deleted, or a head branch written into. */
   branchFacts(repo: RepoRef, branch: string): Promise<BranchFacts>;
 
   // ── Actions ──

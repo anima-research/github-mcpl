@@ -2,9 +2,10 @@
  * github.merge — merge_pull_request and update_branch.
  *
  * The refusals carry the weight: GITHUB_MERGE_BASE_ALLOW is deny-by-default,
- * a moved head is refused before GitHub is asked, a draft, closed or merged
- * pull request is refused by name, and `delete_branch` never deletes a fork's
- * branch or a base branch. Everything runs against FakeGitHubApi.
+ * a moved head is refused before GitHub is asked, a closed or merged pull
+ * request is refused by name, and so is a draft when merging, and
+ * `delete_branch` never deletes a fork's branch or a base branch. Everything
+ * runs against FakeGitHubApi.
  */
 
 import { strict as assert } from 'node:assert';
@@ -13,6 +14,7 @@ import { mergeToolModule } from '../src/tools-merge.js';
 import {
   MERGE_FEATURE_SET,
   silentLogger,
+  type BranchFacts,
   type StateStore,
   type ThreadRef,
   type ToolContext,
@@ -212,6 +214,8 @@ test('delete_branch keeps a branch GitHub says is a base: protected, default, or
 test('delete_branch keeps a fork’s branch, an unknown head repository, and any base branch', async () => {
   const cases: Array<[Record<string, unknown>, Partial<ToolContext>, RegExp]> = [
     [{ headRepo: { owner: 'a-fork', name: 'rayforce' } }, {}, /head branch kept: the head branch lives in a-fork\/rayforce/],
+    // Another repository of the same owner is another repository too.
+    [{ headRepo: { owner: 'anima-research', name: 'rayforce-2' } }, {}, /head branch kept: the head branch lives in anima-research\/rayforce-2/],
     [{ headRepo: null }, {}, /head branch kept: GitHub no longer knows the head repository/],
     [{ headRepo: undefined }, {}, /head branch kept: GitHub no longer knows the head repository/],
     // A pull request from one base branch into another: `main` → `dev`.
@@ -251,6 +255,8 @@ test('update_branch merges the base in, guarded by the head it read', async () =
   assert.match(out, /asked GitHub to merge dev into feature-8 \(anima-research\/rayforce#8, head abc80+\)/);
   // The full head sha, whatever form the caller gave, and also when it gave none.
   assert.deepEqual(api.callsTo('updatePullRequestBranch')[0].args, [PULL, HEAD]);
+  // GitHub is asked whether the head is a base before anything is written.
+  assert.deepEqual(api.callLog().slice(-2), ['branchFacts', 'updatePullRequestBranch']);
   ok(await mergeToolModule.call('update_branch', { number: 8 }, ctx(api)));
   assert.deepEqual(api.callsTo('updatePullRequestBranch')[1].args, [PULL, HEAD]);
 
@@ -276,8 +282,72 @@ test('update_branch takes a merge’s fences: allowed base, open pull request, h
   }
   // A draft may be brought up to date; it just may not be merged.
   const api = new FakeGitHubApi();
-  api.seedPullRequest({ number: 8, draft: true, head: { ref: 'feature-8', sha: HEAD } });
+  api.seedPullRequest({ number: 8, draft: true, headRepo: TEST_REPO, head: { ref: 'feature-8', sha: HEAD } });
   ok(await mergeToolModule.call('update_branch', { number: 8 }, ctx(api)));
+});
+
+test('update_branch writes to no head GitHub says is a base: default, protected, or targeted by an open PR', async () => {
+  // `main → dev`, with `dev` the only allowed base: no allow-list names `main`,
+  // so only GitHub can say that it is a base.
+  const cases: Array<[BranchFacts, RegExp]> = [
+    [{ protected: false, isDefault: true, openPullsBasedOn: 0 }, /"main" is the repository's default branch/],
+    [{ protected: true, isDefault: false, openPullsBasedOn: 0 }, /"main" is protected on GitHub/],
+    [{ protected: false, isDefault: false, openPullsBasedOn: 1 }, /"main" is the base of another open pull request/],
+  ];
+  for (const [facts, expected] of cases) {
+    const api = new FakeGitHubApi();
+    api.seedPullRequest({ number: 8, headRepo: TEST_REPO, head: { ref: 'main', sha: HEAD } });
+    api.branchFactsByName.set('main', facts);
+    const out = failure(await mergeToolModule.call('update_branch', { number: 8 }, ctx(api)));
+    assert.match(out, /^update_branch refused: the head of anima-research\/rayforce#8 is a base on GitHub: /);
+    assert.match(out, expected);
+    assert.deepEqual(api.callsTo('branchFacts')[0].args, [TEST_REPO, 'main']);
+    assert.equal(api.callsTo('updatePullRequestBranch').length, 0);
+  }
+});
+
+test('update_branch writes only to a head branch of the pull request’s own repository', async () => {
+  const cases: Array<[Record<string, unknown>, RegExp]> = [
+    [{ headRepo: { owner: 'a-fork', name: 'rayforce' } }, /the head branch of anima-research\/rayforce#8 lives in a-fork\/rayforce, not in anima-research\/rayforce/],
+    // Another repository of the same owner is another repository too.
+    [{ headRepo: { owner: 'anima-research', name: 'rayforce-2' } }, /lives in anima-research\/rayforce-2, not in anima-research\/rayforce/],
+    [{ headRepo: null }, /GitHub no longer knows the head repository of anima-research\/rayforce#8/],
+    [{ headRepo: undefined }, /GitHub no longer knows the head repository of anima-research\/rayforce#8/],
+  ];
+  for (const [partial, expected] of cases) {
+    const api = new FakeGitHubApi();
+    api.seedPullRequest({ number: 8, head: { ref: 'feature-8', sha: HEAD }, ...partial });
+    const out = failure(await mergeToolModule.call('update_branch', { number: 8 }, ctx(api)));
+    assert.match(out, expected);
+    assert.equal(api.callsTo('branchFacts').length, 0);
+    assert.equal(api.callsTo('updatePullRequestBranch').length, 0);
+  }
+});
+
+test('a head repository GitHub spells in another case is the pull request’s own repository', async () => {
+  // The pull request's repository keeps the spelling GITHUB_REPOS gave it; the
+  // head repository comes back as GitHub spells it, and GitHub ignores case.
+  const respelled = { owner: 'Anima-Research', name: 'RayForce' };
+  const update = new FakeGitHubApi();
+  update.seedPullRequest({ number: 8, headRepo: respelled, head: { ref: 'feature-8', sha: HEAD } });
+  ok(await mergeToolModule.call('update_branch', { number: 8 }, ctx(update)));
+  assert.equal(update.callsTo('updatePullRequestBranch').length, 1);
+
+  const merge = new FakeGitHubApi();
+  merge.seedPullRequest({ number: 8, headRepo: respelled, head: { ref: 'feature-8', sha: HEAD } });
+  const out = ok(await mergeToolModule.call('merge_pull_request', { number: 8, delete_branch: true }, ctx(merge)));
+  assert.match(out, /\ndeleted branch feature-8$/);
+});
+
+test('update_branch writes nothing when GitHub can’t say whether the head is a base', async () => {
+  const api = seeded();
+  api.branchFactsError = Object.assign(new Error('Not Found'), { status: 404 });
+  const out = failure(await mergeToolModule.call('update_branch', { number: 8 }, ctx(api)));
+  assert.match(
+    out,
+    /^update_branch refused: couldn't ask GitHub whether "feature-8" is a base \(branchFacts failed: GitHub error 404: Not Found\); nothing was written$/,
+  );
+  assert.equal(api.callsTo('updatePullRequestBranch').length, 0);
 });
 
 test('an unknown tool name is refused by the module', async () => {
