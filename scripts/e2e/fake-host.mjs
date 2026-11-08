@@ -290,10 +290,10 @@ function isFatal(err) {
 
 /**
  * The stream closing usually beats the `exit` event, so a child that dies under
- * a command surfaces as mcpl-core's `Connection closed`.
+ * a command surfaces as mcpl-core's `ConnectionClosedError`.
  */
 function isGone(err) {
-  return err?.fatal === true || /connection closed/i.test(String(err?.message ?? err));
+  return err?.fatal === true || err?.name === 'ConnectionClosedError';
 }
 
 async function exitCode() {

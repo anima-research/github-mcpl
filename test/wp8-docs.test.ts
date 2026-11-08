@@ -326,7 +326,11 @@ test('README: the manifest-callback listener parses and captures a code', async 
   }
 });
 
-test('README: the credential split creates both files at mode 600', () => {
+const noJq = spawnSync('jq', ['--version']).error !== undefined;
+
+test('README: the credential split creates both files at mode 600', {
+  skip: noJq && !process.env.CI && 'jq is not on PATH, and the block calls it',
+}, () => {
   const block = shellBlock('README.md', 'app-manifests');
   const { home, cfg } = freshHome();
   try {
@@ -465,7 +469,9 @@ test('README: the checkout exists before a step runs something out of it', () =>
     'docs/deploy.md builds the checkout README step 1 made');
 });
 
-test('README: an empty host reaches the registration script by following step 1', () => {
+test('README: an empty host reaches the registration script by following step 1', {
+  skip: !existsSync(root('.git')) && !process.env.CI && 'this copy is not a git checkout, and step 1 clones it',
+}, () => {
   const home = mkdtempSync(join(tmpdir(), 'wp8-host-'));
   try {
     const step1 = setupBlocks().find((b) => /git clone/.test(b));

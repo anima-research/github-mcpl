@@ -2,9 +2,6 @@
  * The example recipes' wake policies, run through agent-framework's own
  * EventGate matcher: a wake policy set is ordered, first-match-wins, and
  * `metadataTrue` is an OR-list.
- *
- * agent-framework is not a dependency of this package, so these tests load it
- * from a sibling checkout and skip when there is none.
  */
 
 import { strict as assert } from 'node:assert';
@@ -72,6 +69,7 @@ const candidates = gateModuleCandidates();
 const gatePath = candidates.find((p) => existsSync(p));
 
 async function loadGate(): Promise<GateModule> {
+  assert.ok(gatePath, skipReason);
   // A computed specifier on purpose: the path is outside the package, so it
   // must not become a compile-time module resolution.
   return (await import(gatePath as string)) as GateModule;
@@ -92,7 +90,9 @@ async function gateFor(recipeName: string): Promise<{ probe(info: GateEventInfo)
 
 const skipReason =
   `no agent-framework beside this checkout (${candidates.length} paths tried); ` +
-  'set GITHUB_MCPL_GATE_MODULE to the gate module to run these';
+  'run `npm install --no-save @animalabs/agent-framework`, or set GITHUB_MCPL_GATE_MODULE to the gate module, to run these';
+
+const skip = !gatePath && !process.env.CI && skipReason;
 
 const base = {
   eventType: 'mcpl:push-event',
@@ -155,64 +155,64 @@ const push: GateEventInfo = {
 };
 
 for (const name of ['recipe-maintainer-clone.json', 'recipe-contributor.json']) {
-  test(`${name}: a green build on the agent's own thread does not wake it`, { skip: gatePath ? false : skipReason }, async () => {
+  test(`${name}: a green build on the agent's own thread does not wake it`, { skip }, async () => {
     const d = (await gateFor(name)).probe(ownThreadCiSuccess);
     assert.equal(d.trigger, false, `woke via ${d.policyName}`);
     assert.equal(d.policyName, 'github-machine-noise');
   });
 
-  test(`${name}: a broken build on the agent's own thread wakes it`, { skip: gatePath ? false : skipReason }, async () => {
+  test(`${name}: a broken build on the agent's own thread wakes it`, { skip }, async () => {
     const d = (await gateFor(name)).probe(ownThreadCiFailure);
     assert.equal(d.trigger, true);
     assert.equal(d.policyName, 'github-ci-failure-own-thread');
   });
 
-  test(`${name}: a bot's pull request neither wakes nor debounces`, { skip: gatePath ? false : skipReason }, async () => {
+  test(`${name}: a bot's pull request neither wakes nor debounces`, { skip }, async () => {
     const d = (await gateFor(name)).probe(botOpenedPull);
     assert.equal(d.trigger, false);
     assert.equal(d.policyName, 'github-other-bots', 'a bot must be excluded before any wake or debounce rule');
     assert.equal(d.behavior, 'skip', 'skip, not a debounce that fires 60 s later');
   });
 
-  test(`${name}: a human mention wakes it`, { skip: gatePath ? false : skipReason }, async () => {
+  test(`${name}: a human mention wakes it`, { skip }, async () => {
     const d = (await gateFor(name)).probe(humanMention);
     assert.equal(d.trigger, true);
     assert.equal(d.policyName, 'github-direct-address');
   });
 
-  test(`${name}: its own comment does not wake it`, { skip: gatePath ? false : skipReason }, async () => {
+  test(`${name}: its own comment does not wake it`, { skip }, async () => {
     const d = (await gateFor(name)).probe(ownComment);
     assert.equal(d.trigger, false);
     assert.equal(d.policyName, 'github-self');
   });
 
-  test(`${name}: a push does not wake it`, { skip: gatePath ? false : skipReason }, async () => {
+  test(`${name}: a push does not wake it`, { skip }, async () => {
     const d = (await gateFor(name)).probe(push);
     assert.equal(d.trigger, false);
     assert.equal(d.policyName, 'github-machine-noise');
   });
 
-  test(`${name}: no rule is unreachable`, { skip: gatePath ? false : skipReason }, async () => {
+  test(`${name}: no rule is unreachable`, { skip }, async () => {
     const { findShadowedPolicies, formatShadowWarning } = await loadGate();
     const warnings = findShadowedPolicies(recipe(name).modules.wake.policies);
     assert.deepEqual(warnings.map(formatShadowWarning), [], 'first match wins: an earlier rule eats a later one');
   });
 }
 
-test('recipe-maintainer-clone.json: a human opening a pull request debounces, it does not wake at once', { skip: gatePath ? false : skipReason }, async () => {
+test('recipe-maintainer-clone.json: a human opening a pull request debounces, it does not wake at once', { skip }, async () => {
   const d = (await gateFor('recipe-maintainer-clone.json')).probe(humanOpenedPull);
   assert.equal(d.policyName, 'github-new-work');
   assert.deepEqual(d.behavior, { debounce: 60000 });
   assert.equal(d.trigger, false, 'a debounce never triggers inline; it fires once the burst settles');
 });
 
-test('recipe-contributor.json: a human opening a pull request is ambient, the contributor does not triage', { skip: gatePath ? false : skipReason }, async () => {
+test('recipe-contributor.json: a human opening a pull request is ambient, the contributor does not triage', { skip }, async () => {
   const d = (await gateFor('recipe-contributor.json')).probe(humanOpenedPull);
   assert.equal(d.trigger, false);
   assert.equal(d.policyName, 'github-ambient');
 });
 
-test('recipe-contributor.json: a thread the agent took part in wakes it, issue or pull request', { skip: gatePath ? false : skipReason }, async () => {
+test('recipe-contributor.json: a thread the agent took part in wakes it, issue or pull request', { skip }, async () => {
   const gate = await gateFor('recipe-contributor.json');
   for (const kind of ['issue', 'pull'] as const) {
     const d = gate.probe({
@@ -225,8 +225,4 @@ test('recipe-contributor.json: a thread the agent took part in wakes it, issue o
     assert.equal(d.trigger, true, `${kind}: did not wake`);
     assert.equal(d.policyName, 'github-participated-threads');
   }
-});
-
-test('the gate matcher was actually exercised', { skip: gatePath ? false : skipReason }, () => {
-  assert.ok(gatePath, 'resolved agent-framework');
 });
