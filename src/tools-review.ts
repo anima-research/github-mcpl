@@ -81,9 +81,9 @@ export function parseReviewComments(value: unknown): ReviewCommentInput[] {
 }
 
 /**
- * `resolve_thread` takes the GraphQL node id `list_review_threads` prints, not
- * the channel's `rt:<comment id>`, so that form is refused with the
- * difference named.
+ * `resolve_thread` and `unresolve_thread` take the GraphQL node id
+ * `list_review_threads` prints, not the channel's `rt:<comment id>`, so that
+ * form is refused with the difference named.
  */
 export function requireReviewThreadId(args: Record<string, unknown>): string {
   const threadId = requireString(args, 'threadId');

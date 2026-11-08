@@ -112,7 +112,6 @@ export class CapabilityGrant {
     }
 
     if (form === 'request' && params.effectiveCapabilities === undefined) {
-      // MCPL §5.4: an absent `effectiveCapabilities` is the empty allowlist.
       notes.push(
         'No effectiveCapabilities in featureSets/update; treating the grant as empty (SPEC 0.5 §5.4).',
       );

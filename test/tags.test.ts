@@ -433,8 +433,6 @@ test('every metadata string is bounded and no raw payload reaches metadata', () 
   ]));
 });
 
-// The producer ontology: MCPL RFC-001 §5.
-
 test('the ontology declares the core tags this server emits and no others', () => {
   assert.deepEqual(sorted(GITHUB_TAG_ONTOLOGY.coreTags ?? []), sorted(CORE_TAGS));
 });
