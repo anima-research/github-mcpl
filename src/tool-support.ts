@@ -13,6 +13,7 @@ import {
 
 export const FIELD = {
   name: LIMITS.titleChars,
+  /** `owner/name`: GitHub allows 39 + 1 + 100 characters. */
   slug: 160,
   sha: 64,
   nodeId: 128,
@@ -101,8 +102,9 @@ export function uncertainWrite(err: unknown): string | null {
 }
 
 /**
- * A refusal, a malformed call or a GitHub error comes back as an error result
- * the model can read, not as a JSON-RPC error.
+ * MCP reports a tool's own failure (a refusal, a malformed argument, a GitHub
+ * error) in the tool's result with `isError: true`, not as a JSON-RPC error,
+ * so the model can read it (MCP spec, Tools, Error Handling).
  */
 export async function runTool(
   tool: string,

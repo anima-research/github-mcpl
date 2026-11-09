@@ -30,15 +30,14 @@
  * the wait was issued.
  *
  * A tool call the connector refuses comes back as a result carrying `isError`,
- * not as a JSON-RPC error, so results are judged: `isError` fails any command,
- * and so do `delivered: false` from `publish` and `success: false` or a
- * non-empty `notUndone` from `rollback`.
+ * not as a JSON-RPC error, except an unknown tool or one the grant denies, which
+ * is a JSON-RPC error. So results are judged: `isError` fails any command, and
+ * so do `delivered: false` from `publish` and `success: false` or a non-empty
+ * `notUndone` from `rollback`.
  *
  * `"expectError": true` marks a command whose refusal is the scenario: a
  * refusal passes and a success fails. A timeout, or the child exiting under
  * the command, fails either way.
- *
- * Any failure sets the exit status to 1.
  */
 
 import { spawn } from 'node:child_process';

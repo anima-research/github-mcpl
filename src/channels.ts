@@ -330,10 +330,10 @@ export class ChannelRegistry {
 
   /**
    * A publish with no `threadId`, or with `review:<id>`, becomes a comment on
-   * the thread, since GitHub has no reply API for a review summary; `rt:<id>`
-   * becomes a reply in that review conversation. A publish whose text is empty
-   * once trimmed posts nothing and returns `delivered: false`, `route: 'none'`
-   * and `reason: 'empty-content'`. Refused with -32023 for a channel that isn't
+   * the thread, since GitHub has no reply API for a review summary. A publish
+   * whose text is empty once trimmed posts nothing, whatever its `threadId`,
+   * and returns `delivered: false`, `route: 'none'` and
+   * `reason: 'empty-content'`. Refused with -32023 for a channel that isn't
    * registered, and with -32602 for a non-text block, a `threadId` of another
    * form, or an `rt:` reply on an issue.
    */

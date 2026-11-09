@@ -302,8 +302,8 @@ test('resolve_thread refuses a node id that is not on the pull request', async (
   const api = new FakeGitHubApi();
   api.seedPullRequest({ number: 8, author: HUMAN });
   api.seedReviewThread(PULL, { id: 'RT_ours', isResolved: false });
-  // A review thread's GraphQL node id names no repository, so only the
-  // allow-list's membership check can refuse a foreign thread.
+  // A review thread's GraphQL node id names no repository, so only the pull
+  // request's own thread list can refuse a foreign thread.
   const foreignPull: ThreadRef = { repo: OTHER_REPO, number: 8, kind: 'pull' };
   api.seedPullRequest({ repo: OTHER_REPO, number: 8 });
   api.seedReviewThread(foreignPull, { id: 'RT_foreign', isResolved: false });

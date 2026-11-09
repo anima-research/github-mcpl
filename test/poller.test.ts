@@ -652,7 +652,7 @@ test('the bot\'s comment and close on an issue that mentions it do not come back
   const first = await r.poller.pollOnce();
   assert.deepEqual(first.delivered.map((e) => e.kind), ['issue.opened']);
 
-  // A comment bumps the issue's updated_at and changes nothing else on it.
+  // A comment bumps the issue's updated_at and comments count, nothing else.
   const bot = { login: TEST_BOT.login, isBot: true };
   api.seedComment({ repo: TEST_REPO, number: 10, kind: 'issue' }, { author: bot, body: 'Seen.', updatedAt: '2026-10-14T01:00:00.000Z' });
   issue.updatedAt = '2026-10-14T01:00:00.000Z';
