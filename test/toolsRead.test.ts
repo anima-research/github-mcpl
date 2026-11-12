@@ -10,7 +10,9 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import type { TagBehavior, TreatmentRule } from '@animalabs/mcpl-core';
 import { buildFeatureSets, buildServerCapabilities, GITHUB_TAG_ONTOLOGY } from '../src/feature-sets.js';
+import { actionsToolModule } from '../src/tools-actions.js';
 import { issuesToolModule, prToolModule } from '../src/tools-issues-pr.js';
+import { mergeToolModule } from '../src/tools-merge.js';
 import { readToolModule } from '../src/tools-read.js';
 import { reviewToolModule } from '../src/tools-review.js';
 import {
@@ -84,10 +86,10 @@ const PULL: ThreadRef = { repo: TEST_REPO, number: 8, kind: 'pull' };
 // Feature sets
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('six feature sets are declared, with the contract’s rollback flags', () => {
+test('eight feature sets are declared, with the contract’s rollback flags', () => {
   const declared = buildFeatureSets();
   assert.deepEqual(Object.keys(declared).sort(), [...FEATURE_SETS].sort());
-  assert.equal(Object.keys(declared).length, 6);
+  assert.equal(Object.keys(declared).length, 8);
 
   for (const [name, declaration] of Object.entries(declared)) {
     assert.ok(declaration.description.length > 0, `${name} needs a description`);
@@ -96,7 +98,15 @@ test('six feature sets are declared, with the contract’s rollback flags', () =
   }
   // Only github.comments can undo what it did (§8.1).
   assert.equal(declared[COMMENTS_FEATURE_SET].rollback, true);
-  for (const name of [EVENTS_FEATURE_SET, READ_FEATURE_SET, REVIEW_FEATURE_SET, ISSUES_FEATURE_SET, PR_FEATURE_SET]) {
+  for (const name of [
+    EVENTS_FEATURE_SET,
+    READ_FEATURE_SET,
+    REVIEW_FEATURE_SET,
+    ISSUES_FEATURE_SET,
+    PR_FEATURE_SET,
+    'github.merge',
+    'github.actions',
+  ]) {
     assert.equal(declared[name].rollback, false, `${name} is not rollback-capable`);
   }
 });
@@ -110,7 +120,7 @@ test('uses names only the paths a call site needs', () => {
   assert.deepEqual(declared[EVENTS_FEATURE_SET].uses, ['pushEvents']);
   // channels/publish writes a comment, which is what github.comments authorizes.
   assert.deepEqual(declared[COMMENTS_FEATURE_SET].uses, ['tools', 'channels.publish']);
-  for (const name of [READ_FEATURE_SET, REVIEW_FEATURE_SET, ISSUES_FEATURE_SET, PR_FEATURE_SET]) {
+  for (const name of [READ_FEATURE_SET, REVIEW_FEATURE_SET, ISSUES_FEATURE_SET, PR_FEATURE_SET, 'github.merge', 'github.actions']) {
     assert.deepEqual(declared[name].uses, ['tools'], `${name} only needs tools`);
   }
   // github.events has no tools (the contract), so it must not claim the path.
@@ -157,7 +167,14 @@ test('the manifest advertises what the declarations use', () => {
 });
 
 test('every tool belongs to exactly one feature set', () => {
-  const modules: ToolModule[] = [readToolModule, issuesToolModule, prToolModule, reviewToolModule];
+  const modules: ToolModule[] = [
+    readToolModule,
+    issuesToolModule,
+    prToolModule,
+    reviewToolModule,
+    mergeToolModule,
+    actionsToolModule,
+  ];
   const owner = new Map<string, string>();
   for (const module of modules) {
     for (const tool of module.tools) {
@@ -184,6 +201,32 @@ test('every tool belongs to exactly one feature set', () => {
     .flat()
     .filter((name) => !owner.has(name));
   assert.deepEqual(unimplemented.sort(), [...TOOLS_BY_FEATURE_SET[COMMENTS_FEATURE_SET]].sort());
+});
+
+test('list_reviews ends on the newest review and drops the oldest past the bound', async () => {
+  const api = new FakeGitHubApi();
+  api.seedPullRequest({ number: 8 });
+  const last = LIMITS.listEntries + 2;
+  api.seedReviews(
+    PULL,
+    Array.from({ length: last + 1 }, (_, i) =>
+      i === last
+        ? { id: i + 1, state: 'approved' as const, body: 'LGTM — merge' }
+        : { id: i + 1, state: 'commented' as const, body: `round ${i + 1}` },
+    ),
+  );
+
+  const out = ok(await readToolModule.call('list_reviews', { number: 8 }, ctx(api)));
+  assert.match(out, /^53 reviews on anima-research\/rayforce#8, oldest first/);
+  assert.match(out, /… 3 older not shown \(list bound 50\)/);
+  assert.doesNotMatch(out, /— id 3 /, 'the oldest are the ones dropped');
+  assert.match(out, /— id 53 approved by human-one .*\nLGTM — merge$/);
+});
+
+test('list_reviews on a pull request with none says so', async () => {
+  const api = new FakeGitHubApi();
+  api.seedPullRequest({ number: 8 });
+  assert.equal(ok(await readToolModule.call('list_reviews', { number: 8 }, ctx(api))), 'no reviews on anima-research/rayforce#8');
 });
 
 test('every read tool takes an optional repo and declares its required arguments', () => {
@@ -329,6 +372,18 @@ test('search_issues bounds the limit to the rendered list bound', async () => {
   api.clearCalls();
   ok(await readToolModule.call('search_issues', { query: 'flaky', limit: 500 }, ctx(api)));
   assert.deepEqual(api.callsTo('searchIssues')[0].args, [TEST_REPO, 'flaky', LIMITS.listEntries]);
+});
+
+test('search_issues says how many results from other repositories it left out', async () => {
+  const api = new FakeGitHubApi();
+  api.seedIssue({ number: 7, title: 'flaky test' });
+  api.searchOutside = 2;
+  const out = ok(await readToolModule.call('search_issues', { query: 'flaky' }, ctx(api)));
+  assert.match(out, /1 match in anima-research\/rayforce for "flaky"/);
+  assert.match(out, /2 results on this page from other repositories left out: a search stays inside anima-research\/rayforce/);
+  api.seedIssue({ number: 8, title: 'other' });
+  const none = ok(await readToolModule.call('search_issues', { query: 'nothing here' }, ctx(api)));
+  assert.match(none, /no matches in anima-research\/rayforce for "nothing here"\n2 results on this page from other repositories left out/);
 });
 
 test('search_issues says so when nothing matches', async () => {
