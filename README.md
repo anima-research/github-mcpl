@@ -239,11 +239,76 @@ told where Node is instead of looking.
 | `GITHUB_WEBHOOK_PORT` | no | unset = listener off | TCP port of the webhook listener (bind it to loopback, terminate TLS in front). |
 | `GITHUB_WEBHOOK_PATH` | no | `/github/webhook` | Path the listener answers on. |
 | `GITHUB_POLL_INTERVAL_MS` | no | `0` (off) | Polling fallback: issues and PRs, issue comments and review comments updated since each list's cursor, plus the checks on the heads of the open PRs seen. `0` is off; a non-zero value below `60000` is refused. Partial — it cannot see a submitted review, a review request or a push ([what polling misses](docs/deploy.md#option-3--polling-only-no-webhook-at-all)) — and it is not meant to run alongside the webhook. |
-| `GITHUB_REPOS` | yes | — | Comma-separated `owner/name` allow-list; a write anywhere else is refused by name. Several entries must share one owner (one App installation, one token); a second owner is a second server process. With several, every tool call names its repository. |
+| `GITHUB_REPOS` | yes | — | Comma-separated `owner/name` allow-list; tools name a configured entry, including its GitHub-resolved rename/transfer target. Several entries must share one owner (one App installation, one token); a second owner is a second server process. With several, every tool call names its repository. Definitively gone/inaccessible entries are set aside; the connector stays up even when none validate (see below). |
 | `GITHUB_PR_BASE_ALLOW` | no | empty = no PR target allowed | Branches a pull request may target or be retargeted to. A plain `branch` applies to every repository, `owner/name:branch` to that one: `anima-research/rayforce:dev,main`. |
 | `GITHUB_STATE_FILE` | no | unset = in-memory only | Durable JSON: checkpoint lineage, rollback bookkeeping, and the polling state: a cursor for each repository and list (`pollCursors`), `lastPollAt` where a list with none starts, and the rows announced as new (`pollNew`). A list with a cursor of its own starts from it, not from `lastPollAt`. |
 | `GITHUB_BOT_LOGIN` | yes | — | The App's bot login, e.g. `rayforce-clone[bot]`. From-self and mention detection depend on it. |
 | `GITHUB_MAINTAINERS` | no | empty | Comma-separated logins marked `isMaintainer` in metadata and tagged `github:actor=maintainer`. |
+
+#### Repository availability
+
+Startup checks each configured name using the App installation token. Definitively
+missing or inaccessible repositories (404/410/access-denied 403) are **set aside**,
+with a warning on stderr; healthy repositories continue normally. Malformed entries
+and other configuration errors remain fatal. Even when one or all repositories are
+unavailable, startup stays alive to deliver events and recheck; unvalidated repository
+operations fail closed.
+
+**Upstream rename compatibility is preserved:** a configured entry that GitHub
+resolves to another canonical name keeps working, including a transfer to another
+owner when the existing token can access it. Configured entries must still share
+one owner; this does not admit arbitrary repositories or add the canonical name
+as a separate tool-addressable entry. A `repo.renamed` event names both the configured
+and canonical `owner/name` so the agent can update `GITHUB_REPOS`. It emits once per
+observed canonical target, repeating only when that target changes again; case-only
+differences are silent. This notice does not disable operations or require an update
+to keep using a working redirect.
+
+An independent hourly check runs even with `GITHUB_POLL_INTERVAL_MS=0` and
+re-enables repositories reachable through their configured entries. Repository
+errors during tools or polling trigger an earlier check; a missing issue alone
+does not disable its repository. Content reads/writes and installation discovery
+retain upstream fetch redirect semantics. Metadata follows constrained same-origin
+redirects to identify the target. Rename notices appear on startup or the next
+metadata check (including Search/GraphQL/node validation), not every redirected read.
+
+Search results and GraphQL thread responses must identify the canonical target
+that a fresh lookup through the configured entry resolves to, not an unrelated
+repository. Review-thread mutations also validate the actual node's pull number.
+Resolve/unresolve mutations are not automatically retried, including after rate-limit
+or authentication rejection; a new invocation must validate scope again.
+GitHub offers no atomic target condition on these node-ID mutations: a scope change
+after final validation but before mutation execution remains an API limitation.
+Tools, channel open (including cached descriptors), publish, and history targeting
+a set-aside repository refuse with its reason. Local channel list/close/typing
+remain available; they do not access GitHub repository data. Poll cursors are held
+for unavailable repositories so recovery can catch up without blocking siblings.
+
+Network errors, rate limits (including HTTP 429 and rate-limited 403), and 5xx
+responses do **not** change the last confirmed availability or emit lifecycle
+events. A required validation that fails transiently fails that operation;
+independent retries start after 5 seconds with exponential backoff capped at
+60 seconds (timer resolution: 5 seconds). Unvalidated startup repositories stay
+closed until a probe succeeds or returns a definitive answer. Without an explicit
+installation ID, failed installation discovery shares one result and 5–60 second
+retry backoff across repositories, rather than repeating the traversal per probe.
+Discovery still tries healthy siblings when earlier entries fail.
+
+Availability and rename changes emit `repo.unavailable` / `repo.available` /
+`repo.renamed` through `github.events`, with corresponding `github:repo=unavailable` /
+`github:repo=available` / `github:repo=renamed` tags, the configured repository, a
+reason, and the canonical name for rename notices.
+These are repository-level pushes, not thread/channel messages. Hosts must
+negotiate MCPL and grant `pushEvents` and `github.events`; plain MCP only sees
+stderr warnings and tool refusals. The manifest suggests immediate treatment;
+hosts with custom wake rules should explicitly route these tags. See
+[the event reference](docs/events.md#repository-availability).
+
+Only changes emit events, not every poll. Before a host can accept a push, the
+latest pending availability state and rename notice per repository are retained
+separately in memory. Restarting validates and reports current outages/renames afresh. Whether all repositories
+are unavailable at startup or become unavailable later, the process stays up to
+report the outage and check for recovery.
 
 ### 8. Build and run it
 

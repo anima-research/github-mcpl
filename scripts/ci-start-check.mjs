@@ -6,6 +6,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SERVER = fileURLToPath(new URL("../dist/src/index.js", import.meta.url));
+const scenario = process.argv[2] ?? 'healthy';
+if (!['healthy', 'missing', 'all-missing', 'renamed', 'transient'].includes(scenario)) {
+  throw new Error(`unknown offline startup scenario: ${scenario}`);
+}
 const ANSWER_MS = 30_000;
 const EXIT_MS = 10_000;
 
@@ -21,11 +25,12 @@ writeFileSync(
   { mode: 0o600 },
 );
 
-const child = spawn(process.execPath, [SERVER, "--stdio"], {
+const child = spawn(process.execPath, ["--import", fileURLToPath(new URL("./ci-github-fetch.mjs", import.meta.url)), SERVER, "--stdio"], {
   env: {
     GITHUB_APP_ID: "1",
     GITHUB_APP_PRIVATE_KEY_FILE: keyFile,
-    GITHUB_REPOS: "example/repo",
+    GITHUB_REPOS: scenario === "all-missing" ? "example/repo,example/other" : "example/repo",
+    CI_START_SCENARIO: scenario,
     GITHUB_BOT_LOGIN: "example[bot]",
     GITHUB_POLL_INTERVAL_MS: "0",
   },
@@ -44,7 +49,7 @@ function finish(code, message) {
   clearTimeout(timer);
   if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   rmSync(dir, { recursive: true, force: true });
-  const line = `ci-start-check (Node ${process.version}): ${message}`;
+  const line = `ci-start-check/${scenario} (Node ${process.version}): ${message}`;
   if (code === 0) console.log(line);
   else {
     console.error(line);
