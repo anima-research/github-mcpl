@@ -106,6 +106,10 @@ export interface GitHubServerOptions {
   maintainers?: readonly string[];
   /** GITHUB_PR_BASE_ALLOW; what `github.pr` may target. */
   prBaseAllow?: readonly string[];
+  /** GITHUB_MERGE_BASE_ALLOW; what `github.merge` may merge into. */
+  mergeBaseAllow?: readonly string[];
+  /** GITHUB_WORKFLOW_ALLOW; what `github.actions` may dispatch or re-run. */
+  workflowAllow?: readonly string[];
   /**
    * The checkpoint store. Absent keeps an in-memory {@link GithubState}, which
    * is what the contract notes say GITHUB_STATE_FILE's absence means.
@@ -292,6 +296,9 @@ const THREAD_ARGUMENT: ReadonlySet<keyof GitHubApi> = new Set<keyof GitHubApi>([
   'updateIssue',
   'updatePullRequest',
   'requestReviewers',
+  'listReviews',
+  'mergePullRequest',
+  'updatePullRequestBranch',
 ]);
 
 /**
@@ -395,6 +402,9 @@ const PULL_ONLY: ReadonlySet<keyof GitHubApi> = new Set<keyof GitHubApi>([
   'replyToReviewComment',
   'updatePullRequest',
   'requestReviewers',
+  'listReviews',
+  'mergePullRequest',
+  'updatePullRequestBranch',
 ]);
 
 /**
@@ -642,6 +652,8 @@ export class GitHubMcplServer {
       botLogin: this.options.botLogin ?? '',
       repos: this.options.repos ?? [],
       prBaseAllow: this.options.prBaseAllow ?? [],
+      mergeBaseAllow: this.options.mergeBaseAllow ?? [],
+      workflowAllow: this.options.workflowAllow ?? [],
       logger: this.logger,
     };
   }

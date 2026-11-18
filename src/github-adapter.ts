@@ -41,6 +41,7 @@ import {
   type ChecksSummary,
   type Comment,
   type Config,
+  type DispatchWorkflowInput,
   type CreateIssueInput,
   type CreatePullRequestInput,
   type CreateReviewInput,
@@ -52,20 +53,28 @@ import {
   type IssueSearchHit,
   type IssueState,
   type IssueStateReason,
+  type ListWorkflowRunsInput,
   type Logger,
+  type MergePullRequestInput,
+  type MergeResult,
   type PolledComment,
   type PolledIssue,
   type PollRead,
   type PullRequest,
   type PullRequestFile,
+  type PullRequestReview,
+  type BranchFacts,
   type RepoRef,
+  type ReviewList,
   type ReviewState,
   type ReviewThread,
   type ReviewThreadComment,
   type SubmittedReview,
+  type SubmittedReviewState,
   type ThreadRef,
   type UpdateIssueInput,
   type UpdatePullRequestInput,
+  type WorkflowRun,
 } from './types.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -111,6 +120,7 @@ const CHECK_RUN_PAGE = 100;
  * rather than summarized from a prefix.
  */
 const CHECK_RUN_MAX_PAGES = 5;
+
 /**
  * Requests one `…Since` poll makes before it stops, past which it goes on
  * only to finish a second it is part way through, and leaves the rest for a
@@ -275,7 +285,11 @@ interface ApiPull {
   merged_at?: string | null;
   mergeable?: boolean | null;
   node_id?: string;
-  head?: { ref?: string | null; sha?: string | null } | null;
+  head?: {
+    ref?: string | null;
+    sha?: string | null;
+    repo?: { name?: string | null; owner?: { login?: string | null } | null } | null;
+  } | null;
   base?: { ref?: string | null; sha?: string | null } | null;
   user?: ApiActor | null;
   requested_reviewers?: Array<ApiActor | null> | null;
@@ -305,6 +319,41 @@ export interface CheckRunRow {
   name?: string;
   status?: string;
   conclusion?: string | null;
+  html_url?: string | null;
+}
+
+/** `pullRequest.reviews(last: n)`: the newest reviews and the count of all of them. */
+interface GqlReviewsResponse {
+  repository?: {
+    pullRequest?: {
+      reviews?: {
+        totalCount?: number | null;
+        nodes?: Array<{
+          databaseId?: number | null;
+          author?: GqlActor | null;
+          state?: string | null;
+          body?: string | null;
+          commit?: { oid?: string | null } | null;
+          submittedAt?: string | null;
+          url?: string | null;
+        } | null> | null;
+      } | null;
+    } | null;
+  } | null;
+}
+
+/** One row of `GET /repos/{o}/{r}/actions/runs`. */
+interface ApiWorkflowRun {
+  id?: number;
+  name?: string | null;
+  path?: string | null;
+  event?: string | null;
+  status?: string | null;
+  conclusion?: string | null;
+  head_branch?: string | null;
+  head_sha?: string | null;
+  run_attempt?: number | null;
+  created_at?: string | null;
   html_url?: string | null;
 }
 
@@ -372,6 +421,55 @@ function reviewStateOf(state: string | null | undefined): ReviewState {
   if (upper === 'APPROVED') return 'approved';
   if (upper === 'CHANGES_REQUESTED') return 'changes_requested';
   return 'commented';
+}
+
+/** A review's state as `GET …/reviews` spells it, including the two `reviewStateOf` folds away. */
+function submittedReviewStateOf(state: string | null | undefined): SubmittedReviewState {
+  const upper = (state ?? '').toUpperCase();
+  if (upper === 'APPROVED') return 'approved';
+  if (upper === 'CHANGES_REQUESTED') return 'changes_requested';
+  if (upper === 'DISMISSED') return 'dismissed';
+  if (upper === 'PENDING') return 'pending';
+  return 'commented';
+}
+
+type GqlReview = NonNullable<
+  NonNullable<NonNullable<NonNullable<GqlReviewsResponse['repository']>['pullRequest']>['reviews']>['nodes']
+>[number];
+
+function mapReview(node: NonNullable<GqlReview>): PullRequestReview {
+  return {
+    id: node.databaseId ?? 0,
+    author: gqlActorOf(node.author),
+    state: submittedReviewStateOf(node.state),
+    body: node.body ?? '',
+    commitId: node.commit?.oid ?? '',
+    submittedAt: node.submittedAt ?? '',
+    html_url: node.url ?? '',
+  };
+}
+
+function mapWorkflowRun(data: ApiWorkflowRun): WorkflowRun {
+  return {
+    id: data.id ?? 0,
+    name: data.name ?? '',
+    path: data.path ?? '',
+    event: data.event ?? '',
+    status: data.status ?? '',
+    conclusion: data.conclusion ?? null,
+    headBranch: data.head_branch ?? '',
+    headSha: data.head_sha ?? '',
+    runAttempt: data.run_attempt ?? 1,
+    createdAt: data.created_at ?? '',
+    html_url: data.html_url ?? '',
+  };
+}
+
+/** The repository a head branch lives in, or null when GitHub no longer knows (a deleted fork). */
+function headRepoOf(head: ApiPull['head']): RepoRef | null {
+  const owner = head?.repo?.owner?.login;
+  const name = head?.repo?.name;
+  return owner && name ? { owner, name } : null;
 }
 
 function mapIssue(repo: RepoRef, data: ApiIssue): Issue {
@@ -1386,6 +1484,176 @@ export class GitHubAdapter implements GitHubApi {
   }
 
   // ───────────────────────────────────────────────────────────────────────────
+  // Reviews (read)
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * The newest {@link LIMITS.listEntries} reviews, through GraphQL's
+   * `reviews(last:)`: REST pages oldest first and has no way to ask for the
+   * end, so a bounded REST read of a long history would drop exactly the
+   * newest verdict. `totalCount` says how many older ones were left out.
+   */
+  async listReviews(pull: ThreadRef): Promise<ReviewList> {
+    const query = `query($owner:String!,$name:String!,$number:Int!,$last:Int!){
+  repository(owner:$owner,name:$name){
+    pullRequest(number:$number){
+      reviews(last:$last){
+        totalCount
+        nodes{ databaseId author{ login __typename } state body commit{ oid } submittedAt url }
+      }
+    }
+  }
+}`;
+    const data = await this.graphql<GqlReviewsResponse>('listReviews', query, {
+      owner: pull.repo.owner,
+      name: pull.repo.name,
+      number: pull.number,
+      last: LIMITS.listEntries,
+    });
+    const reviews = (data.repository?.pullRequest?.reviews?.nodes ?? [])
+      .filter((n): n is NonNullable<GqlReview> => n != null)
+      .map(mapReview);
+    return { total: Math.max(data.repository?.pullRequest?.reviews?.totalCount ?? 0, reviews.length), reviews };
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Merge
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * `PUT …/pulls/{n}/merge` with the head sha the caller read: GitHub answers
+   * 409 when the head has moved since, so a merge can never take a commit
+   * nobody looked at. 405 (not mergeable: a failing required check, a
+   * missing approval, a conflict) and 422 come back as they are.
+   */
+  async mergePullRequest(pull: ThreadRef, input: MergePullRequestInput): Promise<MergeResult> {
+    return this.call('mergePullRequest', async () => {
+      const res = await this.octokit.request('PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge', {
+        owner: pull.repo.owner,
+        repo: pull.repo.name,
+        pull_number: pull.number,
+        merge_method: input.method,
+        sha: input.sha,
+        ...(input.title !== undefined ? { commit_title: input.title } : {}),
+        ...(input.message !== undefined ? { commit_message: input.message } : {}),
+      });
+      const data = res.data as { merged?: boolean; sha?: string | null; message?: string | null };
+      return { merged: data.merged === true, sha: data.sha ?? '', message: data.message ?? '' };
+    });
+  }
+
+  async updatePullRequestBranch(pull: ThreadRef, expectedHeadSha?: string): Promise<void> {
+    await this.call('updatePullRequestBranch', async () => {
+      await this.octokit.request('PUT /repos/{owner}/{repo}/pulls/{pull_number}/update-branch', {
+        owner: pull.repo.owner,
+        repo: pull.repo.name,
+        pull_number: pull.number,
+        ...(expectedHeadSha !== undefined ? { expected_head_sha: expectedHeadSha } : {}),
+      });
+    });
+  }
+
+  async deleteBranch(repo: RepoRef, branch: string): Promise<void> {
+    await this.call('deleteBranch', async () => {
+      await this.octokit.request('DELETE /repos/{owner}/{repo}/git/refs/{ref}', {
+        owner: repo.owner,
+        repo: repo.name,
+        ref: `heads/${branch}`,
+      });
+    });
+  }
+
+  async branchFacts(repo: RepoRef, branch: string): Promise<BranchFacts> {
+    return this.call('branchFacts', async () => {
+      const [branchRes, repoRes, pullsRes] = await Promise.all([
+        this.octokit.request('GET /repos/{owner}/{repo}/branches/{branch}', {
+          owner: repo.owner,
+          repo: repo.name,
+          branch,
+        }),
+        this.octokit.request('GET /repos/{owner}/{repo}', { owner: repo.owner, repo: repo.name }),
+        this.octokit.request('GET /repos/{owner}/{repo}/pulls', {
+          owner: repo.owner,
+          repo: repo.name,
+          state: 'open',
+          base: branch,
+          per_page: 1,
+        }),
+      ]);
+      return {
+        protected: (branchRes.data as { protected?: boolean }).protected === true,
+        isDefault: (repoRes.data as { default_branch?: string }).default_branch === branch,
+        openPullsBasedOn: Array.isArray(pullsRes.data) ? pullsRes.data.length : 0,
+      };
+    });
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Actions
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /** The newest runs first (GitHub's order), one page of at most `limit`. */
+  async listWorkflowRuns(repo: RepoRef, input: ListWorkflowRunsInput): Promise<WorkflowRun[]> {
+    const filters = {
+      per_page: Math.max(1, Math.min(input.limit, LIMITS.listEntries)),
+      ...(input.headSha !== undefined ? { head_sha: input.headSha } : {}),
+      ...(input.branch !== undefined ? { branch: input.branch } : {}),
+      ...(input.event !== undefined ? { event: input.event } : {}),
+    };
+    return this.call('listWorkflowRuns', async () => {
+      const res =
+        input.workflow === undefined
+          ? await this.octokit.request('GET /repos/{owner}/{repo}/actions/runs', {
+              owner: repo.owner,
+              repo: repo.name,
+              ...filters,
+            })
+          : await this.octokit.request('GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs', {
+              owner: repo.owner,
+              repo: repo.name,
+              workflow_id: input.workflow,
+              ...filters,
+            });
+      const data = res.data as { workflow_runs?: ApiWorkflowRun[] };
+      return (data.workflow_runs ?? []).slice(0, filters.per_page).map(mapWorkflowRun);
+    });
+  }
+
+  async getWorkflowRun(repo: RepoRef, runId: number): Promise<WorkflowRun> {
+    return this.call('getWorkflowRun', async () => {
+      const res = await this.octokit.request('GET /repos/{owner}/{repo}/actions/runs/{run_id}', {
+        owner: repo.owner,
+        repo: repo.name,
+        run_id: runId,
+      });
+      return mapWorkflowRun(res.data as ApiWorkflowRun);
+    });
+  }
+
+  async dispatchWorkflow(repo: RepoRef, input: DispatchWorkflowInput): Promise<void> {
+    await this.call('dispatchWorkflow', async () => {
+      await this.octokit.request('POST /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches', {
+        owner: repo.owner,
+        repo: repo.name,
+        workflow_id: input.workflow,
+        ref: input.ref,
+        inputs: input.inputs,
+      });
+    });
+  }
+
+  async rerunWorkflowRun(repo: RepoRef, runId: number, failedOnly: boolean): Promise<void> {
+    await this.call('rerunWorkflowRun', async () => {
+      await this.octokit.request(
+        failedOnly
+          ? 'POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs'
+          : 'POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun',
+        { owner: repo.owner, repo: repo.name, run_id: runId },
+      );
+    });
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
   // Polling fallback (contract amendment 1) and identity
   // ───────────────────────────────────────────────────────────────────────────
 
@@ -1598,6 +1866,7 @@ export class GitHubAdapter implements GitHubApi {
       mergeable: data.mergeable ?? null,
       head: { ref: data.head?.ref ?? '', sha: headSha },
       base: { ref: data.base?.ref ?? '', sha: data.base?.sha ?? '' },
+      headRepo: headRepoOf(data.head),
       author: actorOf(data.user),
       requestedReviewers: (data.requested_reviewers ?? [])
         .map((r) => r?.login ?? '')
