@@ -10,7 +10,8 @@ const workspace = mkdtempSync(path.join(tmpdir(), 'github-mcpl-host-check-'));
 const IDLE_BEFORE_INPUT_MS = 400;
 
 function stub(name, { onSigterm = 'clean', crashWhenIdle = false } = {}) {
-  const file = path.join(workspace, `${name}.mjs`);
+  // fake-host invokes .js entries through Node; other suffixes are executables.
+  const file = path.join(workspace, `${name}.js`);
   writeFileSync(
     file,
     `import { createInterface } from 'node:readline';
