@@ -37,6 +37,15 @@ export function repoSlug(repo: RepoRef): string {
   return `${repo.owner}/${repo.name}`;
 }
 
+/** An ISO 8601 instant in UTC as GitHub and this server write them, `2026-10-15T00:09:30Z`, with or without fractional seconds. */
+export function isIsoInstant(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(value) &&
+    Number.isFinite(Date.parse(value))
+  );
+}
+
 /** Parse `owner/name`. Returns null for anything else (no guessing). */
 export function parseRepoSlug(slug: string): RepoRef | null {
   const m = /^([^/\s]+)\/([^/\s]+)$/.exec(slug.trim());
@@ -83,7 +92,8 @@ export type NormalizedEventKind =
   | 'review_comment.created'
   | 'review_comment.edited'
   | 'checks.completed'
-  | 'push';
+  | 'push'
+  | 'thread.read_failed';
 
 export const NORMALIZED_EVENT_KINDS: readonly NormalizedEventKind[] = [
   'issue.opened',
@@ -103,6 +113,7 @@ export const NORMALIZED_EVENT_KINDS: readonly NormalizedEventKind[] = [
   'review_comment.edited',
   'checks.completed',
   'push',
+  'thread.read_failed',
 ] as const;
 
 export type ReviewState = 'approved' | 'changes_requested' | 'commented';
@@ -204,6 +215,8 @@ export interface ChecksSummary {
   conclusion: CheckConclusion | null;
   total: number;
   failed: FailedCheck[];
+  /** Present and true when a run is still going or wasn't read, so a failure isn't yet the sha's last word. */
+  unfinished?: boolean;
 }
 
 export interface PullRequest {
@@ -219,6 +232,13 @@ export interface PullRequest {
   mergeable: boolean | null;
   head: GitRef;
   base: GitRef;
+  /**
+   * The repository the head branch lives in: the base repository for a branch
+   * pushed there, a fork otherwise, `null` when the fork was deleted. Optional
+   * because only the merge tools read it (a head branch is only ever deleted
+   * where it is the base repository's own).
+   */
+  headRepo?: RepoRef | null;
   author: EventActor;
   requestedReviewers: string[];
   createdAt: string;
@@ -286,6 +306,12 @@ export interface IssueSearchHit {
   html_url: string;
 }
 
+/** A search inside one repository: its hits, and how many results GitHub gave from other repositories, left out. */
+export interface IssueSearch {
+  hits: IssueSearchHit[];
+  outside: number;
+}
+
 export type ReviewEvent = 'COMMENT' | 'APPROVE' | 'REQUEST_CHANGES';
 
 export interface ReviewCommentInput {
@@ -336,6 +362,94 @@ export interface CreatePullRequestInput {
   draft?: boolean;
 }
 
+/** A submitted review as `list_reviews` reports it. `pending` is a draft review. */
+export type SubmittedReviewState = 'approved' | 'changes_requested' | 'commented' | 'dismissed' | 'pending';
+
+export interface PullRequestReview {
+  id: number;
+  author: EventActor;
+  state: SubmittedReviewState;
+  body: string;
+  /** The head sha the review was submitted against. */
+  commitId: string;
+  /** Absent on a pending review. */
+  submittedAt: string;
+  html_url: string;
+}
+
+/** The newest reviews (oldest of them first) and the count of all of them. */
+export interface ReviewList {
+  total: number;
+  reviews: PullRequestReview[];
+}
+
+/**
+ * What GitHub knows about a branch that bears on deleting it or writing into
+ * it: a protected branch, the default branch, or a branch other open pull
+ * requests target is somebody's base, whatever the allow-lists say.
+ */
+export interface BranchFacts {
+  protected: boolean;
+  isDefault: boolean;
+  /** Open pull requests whose base is this branch (counted to 1 or more, not exactly). */
+  openPullsBasedOn: number;
+}
+
+export type MergeMethod = 'merge' | 'squash' | 'rebase';
+
+export interface MergePullRequestInput {
+  method: MergeMethod;
+  /** The head sha the merge is for; GitHub refuses with 409 when the head has moved. */
+  sha: string;
+  /** Commit title (merge and squash only). */
+  title?: string;
+  /** Commit message (merge and squash only). */
+  message?: string;
+}
+
+export interface MergeResult {
+  merged: boolean;
+  /** The merge commit (or the last rebased commit) on the base branch. */
+  sha: string;
+  message: string;
+}
+
+/** One row of `GET /repos/{o}/{r}/actions/runs`. */
+export interface WorkflowRun {
+  id: number;
+  /** The workflow's name, e.g. `Review`. */
+  name: string;
+  /** The workflow file, e.g. `.github/workflows/review.yml`. */
+  path: string;
+  event: string;
+  /** queued | in_progress | completed | waiting | requested | pending */
+  status: string;
+  /** Null until the run completes. */
+  conclusion: string | null;
+  headBranch: string;
+  headSha: string;
+  runAttempt: number;
+  createdAt: string;
+  html_url: string;
+}
+
+export interface ListWorkflowRunsInput {
+  /** A workflow file name (`review.yml`); absent = every workflow. */
+  workflow?: string;
+  headSha?: string;
+  branch?: string;
+  event?: string;
+  limit: number;
+}
+
+export interface DispatchWorkflowInput {
+  /** A workflow file name (`review.yml`), checked against GITHUB_WORKFLOW_ALLOW. */
+  workflow: string;
+  /** The branch whose copy of the workflow runs. */
+  ref: string;
+  inputs: Record<string, string>;
+}
+
 /**
  * Polling fallback (contract amendment 1). An App installation token cannot
  * read `GET /notifications`, so the poller asks the repository what changed
@@ -367,6 +481,35 @@ export interface PolledIssue {
    * this, not the author: the bot's own close must come back as from-self.
    */
   closedBy?: EventActor;
+  /**
+   * When it was last closed, from `closed_at`. Contributor mode's
+   * notifications poller reads it for a thread it has no marker for: a close
+   * before that thread's first read starts (five minutes before GitHub's
+   * previous answer to a listing, or, at a first start, five minutes before
+   * W) is old news, one after it is an event.
+   */
+  closedAt?: string;
+  /**
+   * Pull requests only: whether it was merged, from the row's
+   * `pull_request.merged_at`. Absent when the row doesn't say.
+   */
+  merged?: boolean;
+}
+
+/**
+ * One submitted review, newer than the cursor it was fetched with (contributor
+ * mode's notifications poller: `GET pulls/{n}/reviews`, filtered client-side
+ * by `submitted_at` — the endpoint takes no `since`).
+ */
+export interface PolledReview {
+  id: number;
+  author: EventActor;
+  body: string;
+  state: ReviewState;
+  submittedAt: string;
+  html_url: string;
+  /** The commit the review was written against, when GitHub reports one. */
+  commitId?: string;
 }
 
 /** One issue comment or review comment updated since its list's cursor. */
@@ -416,7 +559,12 @@ export interface PollCursor {
 export interface BotIdentity {
   login: string;
   id: number;
-  isBot: true;
+  /**
+   * True for a GitHub App's own identity (`GET /app`). Contributor mode's
+   * `getAuthenticatedBot` answers from `GET /user` instead — a human account,
+   * even though it is the one the server writes as — so this is `false` there.
+   */
+  isBot: boolean;
 }
 
 /**
@@ -431,7 +579,7 @@ export interface GitHubApi {
   listReviewThreads(pull: ThreadRef): Promise<ReviewThread[]>;
   listPullRequestFiles(pull: ThreadRef): Promise<PullRequestFile[]>;
   getCheckRuns(repo: RepoRef, sha: string): Promise<ChecksSummary>;
-  searchIssues(repo: RepoRef, query: string, limit?: number): Promise<IssueSearchHit[]>;
+  searchIssues(repo: RepoRef, query: string, limit?: number): Promise<IssueSearch>;
 
   // ── Comments ──
   createComment(thread: ThreadRef, body: string): Promise<Comment>;
@@ -453,6 +601,29 @@ export interface GitHubApi {
   updatePullRequest(pull: ThreadRef, input: UpdatePullRequestInput): Promise<PullRequest>;
   requestReviewers(pull: ThreadRef, logins: string[]): Promise<void>;
   createPullRequest(repo: RepoRef, input: CreatePullRequestInput): Promise<PullRequest>;
+
+  // ── Reviews (read) ──
+  /**
+   * The newest {@link LIMITS.listEntries} reviews on a pull request, oldest
+   * of them first, and how many there are in all — so a long history drops
+   * its *oldest* reviews, never the newest verdict.
+   */
+  listReviews(pull: ThreadRef): Promise<ReviewList>;
+
+  // ── Merge ──
+  mergePullRequest(pull: ThreadRef, input: MergePullRequestInput): Promise<MergeResult>;
+  /** Merge the base into the head branch; `expectedHeadSha` guards against a moved head. */
+  updatePullRequestBranch(pull: ThreadRef, expectedHeadSha?: string): Promise<void>;
+  /** Delete `refs/heads/<branch>` in `repo`. */
+  deleteBranch(repo: RepoRef, branch: string): Promise<void>;
+  /** What decides whether a merged head branch may be deleted, or a head branch written into. */
+  branchFacts(repo: RepoRef, branch: string): Promise<BranchFacts>;
+
+  // ── Actions ──
+  listWorkflowRuns(repo: RepoRef, input: ListWorkflowRunsInput): Promise<WorkflowRun[]>;
+  getWorkflowRun(repo: RepoRef, runId: number): Promise<WorkflowRun>;
+  dispatchWorkflow(repo: RepoRef, input: DispatchWorkflowInput): Promise<void>;
+  rerunWorkflowRun(repo: RepoRef, runId: number, failedOnly: boolean): Promise<void>;
 
   // ── Polling fallback (amendment 1) and identity ──
   /** `GET /repos/{o}/{r}/issues?state=all&sort=updated&since=`: issues and PRs. */
@@ -485,6 +656,15 @@ export const GITHUB_API_METHODS = [
   'updatePullRequest',
   'requestReviewers',
   'createPullRequest',
+  'listReviews',
+  'mergePullRequest',
+  'updatePullRequestBranch',
+  'deleteBranch',
+  'branchFacts',
+  'listWorkflowRuns',
+  'getWorkflowRun',
+  'dispatchWorkflow',
+  'rerunWorkflowRun',
   'listIssuesSince',
   'listIssueCommentsSince',
   'listReviewCommentsSince',
@@ -529,6 +709,17 @@ export interface ToolContext {
   repos: readonly RepoRef[];
   /** GITHUB_PR_BASE_ALLOW entries, as written; {@link allowedBases} resolves them per repository. */
   prBaseAllow: readonly string[];
+  /**
+   * GITHUB_MERGE_BASE_ALLOW entries, as written, resolved the same way. Absent
+   * or empty means no pull request may be merged at all.
+   */
+  mergeBaseAllow?: readonly string[];
+  /**
+   * GITHUB_WORKFLOW_ALLOW entries, as written: the workflow files the
+   * github.actions tools may dispatch or re-run (`review.yml`, or
+   * `owner/name:review.yml` for one repository). Absent or empty means none.
+   */
+  workflowAllow?: readonly string[];
   logger: Logger;
 }
 
@@ -549,6 +740,8 @@ export const COMMENTS_FEATURE_SET = 'github.comments';
 export const REVIEW_FEATURE_SET = 'github.review';
 export const ISSUES_FEATURE_SET = 'github.issues';
 export const PR_FEATURE_SET = 'github.pr';
+export const MERGE_FEATURE_SET = 'github.merge';
+export const ACTIONS_FEATURE_SET = 'github.actions';
 
 export const FEATURE_SETS = [
   EVENTS_FEATURE_SET,
@@ -557,6 +750,8 @@ export const FEATURE_SETS = [
   REVIEW_FEATURE_SET,
   ISSUES_FEATURE_SET,
   PR_FEATURE_SET,
+  MERGE_FEATURE_SET,
+  ACTIONS_FEATURE_SET,
 ] as const;
 
 export type FeatureSetName = (typeof FEATURE_SETS)[number];
@@ -569,6 +764,7 @@ export const TOOL_LIST_REVIEW_THREADS = 'list_review_threads';
 export const TOOL_LIST_PULL_REQUEST_FILES = 'list_pull_request_files';
 export const TOOL_GET_CHECK_RUNS = 'get_check_runs';
 export const TOOL_SEARCH_ISSUES = 'search_issues';
+export const TOOL_LIST_REVIEWS = 'list_reviews';
 
 /** github.comments */
 export const TOOL_COMMENT = 'comment';
@@ -593,6 +789,15 @@ export const TOOL_CREATE_PULL_REQUEST = 'create_pull_request';
 export const TOOL_EDIT_PULL_REQUEST = 'edit_pull_request';
 export const TOOL_REQUEST_REVIEW = 'request_review';
 
+/** github.merge */
+export const TOOL_MERGE_PULL_REQUEST = 'merge_pull_request';
+export const TOOL_UPDATE_BRANCH = 'update_branch';
+
+/** github.actions */
+export const TOOL_LIST_WORKFLOW_RUNS = 'list_workflow_runs';
+export const TOOL_DISPATCH_WORKFLOW = 'dispatch_workflow';
+export const TOOL_RERUN_WORKFLOW_RUN = 'rerun_workflow_run';
+
 /**
  * Which feature set owns which tool. The server (.9) routes a `tools/call` by
  * this map and refuses a tool whose feature set is not active.
@@ -606,6 +811,7 @@ export const TOOLS_BY_FEATURE_SET: Record<Exclude<FeatureSetName, 'github.events
     TOOL_LIST_PULL_REQUEST_FILES,
     TOOL_GET_CHECK_RUNS,
     TOOL_SEARCH_ISSUES,
+    TOOL_LIST_REVIEWS,
   ],
   [COMMENTS_FEATURE_SET]: [
     TOOL_COMMENT,
@@ -617,6 +823,8 @@ export const TOOLS_BY_FEATURE_SET: Record<Exclude<FeatureSetName, 'github.events
   [REVIEW_FEATURE_SET]: [TOOL_CREATE_REVIEW, TOOL_RESOLVE_THREAD, TOOL_UNRESOLVE_THREAD],
   [ISSUES_FEATURE_SET]: [TOOL_CREATE_ISSUE, TOOL_EDIT_ISSUE, TOOL_CLOSE_ISSUE, TOOL_REOPEN_ISSUE],
   [PR_FEATURE_SET]: [TOOL_CREATE_PULL_REQUEST, TOOL_EDIT_PULL_REQUEST, TOOL_REQUEST_REVIEW],
+  [MERGE_FEATURE_SET]: [TOOL_MERGE_PULL_REQUEST, TOOL_UPDATE_BRANCH],
+  [ACTIONS_FEATURE_SET]: [TOOL_LIST_WORKFLOW_RUNS, TOOL_DISPATCH_WORKFLOW, TOOL_RERUN_WORKFLOW_RUN],
 };
 
 /** Which feature sets can undo what they did since a checkpoint (§8.1). */
@@ -769,6 +977,7 @@ export const GITHUB_TAGS = [
   'github:ci=success',
   'github:ci=failure',
   'github:push',
+  'github:read-failed',
   'github:actor=maintainer',
 ] as const;
 
@@ -903,7 +1112,56 @@ export interface StateSnapshot {
    * recorded here; bounded by {@link POLL_HEAD_MEMORY}.
    */
   pollHeads: Record<string, string>;
+  /**
+   * Contributor mode's notifications watermark: `since`, the instant (ISO) the
+   * notifications list is read from; `lastModified`, the HTTP-date the last
+   * full listing answered, sent back as `If-Modified-Since`; and `answeredAt`,
+   * when GitHub last answered a listing (ISO), a 304 included, where a thread
+   * read for the first time reaches back from. A field of
+   * its own, so a state file kept across a switch of modes never hands App
+   * mode's `lastPollAt` an HTTP-date, or this an ISO instant. A state file
+   * written before it has none: no watermark yet. `retry` is the threads the
+   * poller still owes a read ({@link NotificationRetry}); dropping it would
+   * lose what their failed reads held back.
+   */
+  notifications: NotificationsWatermark & { retry: NotificationRetry[] };
 }
+
+/** {@link StateSnapshot.notifications}: where the next listing starts, and what it sends. */
+export interface NotificationsWatermark {
+  since: string | null;
+  lastModified: string | null;
+  answeredAt: string | null;
+}
+
+/**
+ * A notified thread whose last read or delivery failed, or that GitHub's rate
+ * limit kept from being read: the notifications poller reads it again on each
+ * pass whose listing gets through, listed or not, until it gets through or has
+ * failed {@link NOTIFICATION_RETRY_LIMIT} passes in a row. A stopped entry
+ * retains that count and cursor until a newer notification reopens it.
+ */
+export interface NotificationRetry {
+  /** Latest notification update seen; a strictly newer update reopens a stopped entry. */
+  updatedAt?: string;
+  /** Terminal retry record, retained so re-listing the same update cannot reset attempts. */
+  stopped?: boolean;
+  /** The drop notice for this notification update was attempted, even if the host refused it. */
+  dropAnnounced?: boolean;
+  owner: string;
+  name: string;
+  number: number;
+  kind: ThreadKind;
+  /** Passes it has failed in a row. */
+  attempts: number;
+  /** Its cursor as the head memory holds it, kept here too so eviction there can't lose its place while it waits. */
+  cursor?: string;
+  /** A review request listed for it and not yet delivered: the notification's id and `updated_at`, which a later listing won't show again. */
+  reviewRequest?: { id: string; updatedAt: string };
+}
+
+/** How many passes in a row a notified thread may fail before the poller drops it, naming it and the cause. */
+export const NOTIFICATION_RETRY_LIMIT = 5;
 
 /** How many poll keys the dedup ring remembers. */
 export const POLL_DEDUP_RING = 2000;
@@ -945,6 +1203,12 @@ export interface StateStore {
   /** Per list, the rows announced as new in its window (`StateSnapshot.pollNew`). */
   polledNew(): Readonly<Record<string, Record<string, string>>>;
   setPolledNew(rows: Record<string, Record<string, string>>): void;
+  /** Contributor mode's notifications watermark ({@link StateSnapshot.notifications}). */
+  notificationsWatermark(): NotificationsWatermark;
+  setNotificationsWatermark(watermark: { since: string; lastModified: string | null; answeredAt: string | null }): void;
+  /** Contributor mode's threads to read again ({@link NotificationRetry}). */
+  notificationRetries(): NotificationRetry[];
+  setNotificationRetries(retries: NotificationRetry[]): void;
   /** True when the key was already seen; otherwise records it in the ring and returns false. */
   seenPollKey(key: string): boolean;
   /**
@@ -969,27 +1233,56 @@ export const DEFAULT_WEBHOOK_PATH = '/github/webhook';
 export const MIN_POLL_INTERVAL_MS = 60_000;
 
 /**
- * The validated environment. Secret material (`privateKeyPem`,
+ * Which of the two auth + ingress modes a `Config` was validated for:
+ *
+ *   - `app` — the original GitHub App mode: an installation token minted from
+ *     GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY_FILE, webhook and/or repository
+ *     polling as ingress.
+ *   - `token` — contributor mode: a user's personal access token from
+ *     GITHUB_TOKEN_FILE authenticates every call directly, and the
+ *     notifications poller is the only ingress (no webhook listener).
+ *
+ * `readConfig` picks the mode from which of GITHUB_APP_ID/
+ * GITHUB_APP_PRIVATE_KEY_FILE and GITHUB_TOKEN_FILE are set, and refuses both
+ * at once as ambiguous.
+ */
+export type GithubAuthMode = 'app' | 'token';
+
+/**
+ * The validated environment. Secret material (`privateKeyPem`, `userToken`,
  * `webhookSecret`) is held here and never logged, never put in an error, and
  * never sent to the host.
  */
 export interface Config {
+  authMode: GithubAuthMode;
+  /** App mode only; `''` in contributor mode. */
   appId: string;
-  /** PEM contents of GITHUB_APP_PRIVATE_KEY_FILE. Secret. */
-  privateKeyPem: string;
-  /** Discovered from GITHUB_REPOS when GITHUB_APP_INSTALLATION_ID is absent. */
+  /** PEM contents of GITHUB_APP_PRIVATE_KEY_FILE. Secret. App mode only. */
+  privateKeyPem: string | null;
+  /** Discovered from GITHUB_REPOS when GITHUB_APP_INSTALLATION_ID is absent. App mode only. */
   installationId: number | null;
+  /** Contents of GITHUB_TOKEN_FILE. Secret. Contributor mode only. */
+  userToken: string | null;
   /** Contents of GITHUB_WEBHOOK_SECRET_FILE; present iff `webhookPort` is set. Secret. */
   webhookSecret: string | null;
-  /** Absent = webhook listener off. */
+  /** Absent = webhook listener off. Always absent in contributor mode. */
   webhookPort: number | null;
   webhookPath: string;
-  /** 0 = repository polling off. Never below {@link MIN_POLL_INTERVAL_MS} when on. */
+  /**
+   * App mode: 0 = repository polling off, never below {@link MIN_POLL_INTERVAL_MS}
+   * when on. Contributor mode: the notifications poller's interval, never
+   * below {@link MIN_POLL_INTERVAL_MS} and defaulted to it when unset — the
+   * poller is always on in this mode.
+   */
   pollIntervalMs: number;
   /**
-   * GITHUB_REPOS, the write allow-list. Several repositories are accepted as
-   * long as they share one owner, which is one App installation and so one
-   * token; a second owner is a second server process.
+   * GITHUB_REPOS, the write allow-list. In App mode several repositories are
+   * accepted as long as they share one owner, which is one App installation
+   * and so one token; a second owner is a second server process. In
+   * contributor mode several owners are accepted: the one token authenticates
+   * everywhere the user can reach, and this list bounds what reaches the
+   * agent as well as what it can do: the notifications poller drops threads
+   * from any other repository, and the tools refuse them, reads included.
    */
   repos: RepoRef[];
   /**
@@ -998,7 +1291,19 @@ export interface Config {
    * retargeted. {@link allowedBases} answers for one repository.
    */
   prBaseAllow: string[];
+  /**
+   * GITHUB_MERGE_BASE_ALLOW, in GITHUB_PR_BASE_ALLOW's format: the bases a
+   * pull request may be merged into. Empty — the default — means no merge.
+   */
+  mergeBaseAllow: string[];
+  /**
+   * GITHUB_WORKFLOW_ALLOW: the workflow files (`review.yml`, or
+   * `owner/name:review.yml`) that may be dispatched or re-run. Empty — the
+   * default — means none.
+   */
+  workflowAllow: string[];
   stateFile: string | null;
+  /** GITHUB_BOT_LOGIN. `''` only in contributor mode when unset: startup sets it to the token's own login. */
   botLogin: string;
   maintainers: string[];
 }
@@ -1008,12 +1313,15 @@ export const ENV_VARS = [
   'GITHUB_APP_ID',
   'GITHUB_APP_PRIVATE_KEY_FILE',
   'GITHUB_APP_INSTALLATION_ID',
+  'GITHUB_TOKEN_FILE',
   'GITHUB_WEBHOOK_SECRET_FILE',
   'GITHUB_WEBHOOK_PORT',
   'GITHUB_WEBHOOK_PATH',
   'GITHUB_POLL_INTERVAL_MS',
   'GITHUB_REPOS',
   'GITHUB_PR_BASE_ALLOW',
+  'GITHUB_MERGE_BASE_ALLOW',
+  'GITHUB_WORKFLOW_ALLOW',
   'GITHUB_STATE_FILE',
   'GITHUB_BOT_LOGIN',
   'GITHUB_MAINTAINERS',
@@ -1035,9 +1343,11 @@ export class ConfigError extends Error {
 export type Env = Record<string, string | undefined>;
 
 /**
- * The branches a pull request on `repo` may target: every plain entry of
- * GITHUB_PR_BASE_ALLOW plus the `owner/name:branch` entries scoped to this
- * repository. Order and duplicates as written; the caller only asks `includes`.
+ * The entries of a scoped allow-list that apply to `repo`: every plain entry
+ * plus the `owner/name:<value>` entries scoped to this repository. Used for
+ * branches (GITHUB_PR_BASE_ALLOW, GITHUB_MERGE_BASE_ALLOW) and for workflow
+ * files (GITHUB_WORKFLOW_ALLOW). Order and duplicates as written; the caller
+ * only asks `includes`.
  */
 export function allowedBases(repo: RepoRef, entries: readonly string[]): string[] {
   const out: string[] = [];
@@ -1050,6 +1360,15 @@ export function allowedBases(repo: RepoRef, entries: readonly string[]): string[
     }
   }
   return out;
+}
+
+/**
+ * A workflow file name as `.github/workflows/` holds it: `review.yml`. No
+ * directory, no numeric id — the allow-list and the tools name a workflow by
+ * its file, the one name a reader of the repository can check.
+ */
+export function isWorkflowFileName(name: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*\.ya?ml$/.test(name);
 }
 
 function csv(raw: string | undefined): string[] {
@@ -1104,46 +1423,123 @@ function readPort(name: EnvVar, raw: string | undefined, problems: string[]): nu
 }
 
 /**
- * Validate the environment into a {@link Config}, or throw {@link ConfigError}
- * listing every problem by variable name.
+ * A scoped allow-list — of base branches (GITHUB_PR_BASE_ALLOW,
+ * GITHUB_MERGE_BASE_ALLOW) or of workflow files (GITHUB_WORKFLOW_ALLOW):
+ * `<value>` for every repository, `owner/name:<value>` for one. A scoped entry
+ * must parse and must name a repository in GITHUB_REPOS. `noun` names what
+ * the values are, so an error about workflow files does not talk of branches.
  */
-export function readConfig(env: Env = process.env): Config {
+function readBaseAllow(
+  name: EnvVar,
+  raw: string | undefined,
+  repos: readonly RepoRef[],
+  problems: string[],
+  noun = 'branch',
+): string[] {
+  const entries = csv(raw);
+  for (const entry of entries) {
+    const at = entry.indexOf(':');
+    if (at < 0) continue;
+    const scope = parseRepoSlug(entry.slice(0, at));
+    const branch = entry.slice(at + 1);
+    if (!scope || !branch) {
+      problems.push(`${name}: "${entry}" is neither a ${noun} nor owner/name:${noun}`);
+    } else if (repos.length > 0 && !repoAllowed(scope, repos)) {
+      problems.push(`${name}: "${entry}" names a repository outside GITHUB_REPOS`);
+    }
+  }
+  return entries;
+}
+
+/**
+ * Validate the environment into a {@link Config}, or throw {@link ConfigError}
+ * listing every problem by variable name. Broad multi-owner write allow-lists
+ * are accepted but warned about on stderr (or the supplied startup logger).
+ */
+export function readConfig(env: Env = process.env, logger: Logger = stderrLogger()): Config {
   const problems: string[] = [];
 
-  const appId = env.GITHUB_APP_ID?.trim() ?? '';
-  if (!appId) problems.push('GITHUB_APP_ID: required');
-  else if (!/^\d+$/.test(appId)) problems.push(`GITHUB_APP_ID: must be the numeric App id, got "${appId}"`);
+  // ── Which mode: App key, or a contributor's own token ──
+  //
+  // Both present is refused outright, by name, before either is validated any
+  // further: an operator who set both meant one of them and would otherwise
+  // get whichever branch happened to run, silently. Neither present falls
+  // through to the App-mode checks below, which is the mode this server has
+  // always defaulted to and so is what "nothing configured" should keep
+  // naming.
+  const appIdRaw = env.GITHUB_APP_ID?.trim() ?? '';
+  const keyFileRaw = env.GITHUB_APP_PRIVATE_KEY_FILE?.trim() ?? '';
+  const tokenFileRaw = env.GITHUB_TOKEN_FILE?.trim() ?? '';
+  const hasAppVars = appIdRaw !== '' || keyFileRaw !== '';
+  const hasToken = tokenFileRaw !== '';
+  const authMode: GithubAuthMode = hasToken && !hasAppVars ? 'token' : 'app';
 
-  const keyFile = env.GITHUB_APP_PRIVATE_KEY_FILE?.trim() ?? '';
+  if (hasToken && hasAppVars) {
+    problems.push(
+      'GITHUB_TOKEN_FILE: set together with GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY_FILE; set only one of ' +
+        'App mode (GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY_FILE) or contributor mode (GITHUB_TOKEN_FILE)',
+    );
+  }
+
+  let appId = '';
   let privateKeyPem: string | null = null;
-  if (!keyFile) problems.push('GITHUB_APP_PRIVATE_KEY_FILE: required');
-  else privateKeyPem = readSecretFile('GITHUB_APP_PRIVATE_KEY_FILE', keyFile, problems);
-
   let installationId: number | null = null;
-  const rawInstallation = env.GITHUB_APP_INSTALLATION_ID?.trim();
-  if (rawInstallation) {
-    const n = Number(rawInstallation);
-    if (!Number.isInteger(n) || n <= 0) {
-      problems.push(`GITHUB_APP_INSTALLATION_ID: must be a positive integer, got "${rawInstallation}"`);
+  let userToken: string | null = null;
+
+  if (authMode === 'token') {
+    // A token holds no whitespace, so whitespace or a byte-order mark an
+    // editor left before it goes too. readSecretFile itself keeps leading
+    // bytes, since a webhook secret may begin with a space.
+    userToken = readSecretFile('GITHUB_TOKEN_FILE', tokenFileRaw, problems)?.replace(/^[\uFEFF\s]+/, '') ?? null;
+    if (env.GITHUB_APP_INSTALLATION_ID?.trim()) {
+      problems.push('GITHUB_APP_INSTALLATION_ID: App mode only; contributor mode (GITHUB_TOKEN_FILE) has no installation, so unset it');
+    }
+  } else {
+    if (!appIdRaw) problems.push('GITHUB_APP_ID: required (or set GITHUB_TOKEN_FILE for contributor mode)');
+    else if (!/^\d+$/.test(appIdRaw)) problems.push(`GITHUB_APP_ID: must be the numeric App id, got "${appIdRaw}"`);
+    else appId = appIdRaw;
+
+    if (!keyFileRaw) {
+      problems.push('GITHUB_APP_PRIVATE_KEY_FILE: required (or set GITHUB_TOKEN_FILE for contributor mode)');
     } else {
-      installationId = n;
+      privateKeyPem = readSecretFile('GITHUB_APP_PRIVATE_KEY_FILE', keyFileRaw, problems);
+    }
+
+    const rawInstallation = env.GITHUB_APP_INSTALLATION_ID?.trim();
+    if (rawInstallation) {
+      const n = Number(rawInstallation);
+      if (!Number.isInteger(n) || n <= 0) {
+        problems.push(`GITHUB_APP_INSTALLATION_ID: must be a positive integer, got "${rawInstallation}"`);
+      } else {
+        installationId = n;
+      }
     }
   }
 
-  const webhookPort = readPort('GITHUB_WEBHOOK_PORT', env.GITHUB_WEBHOOK_PORT, problems);
-
-  // Read only when the listener is on: a polling install keeps the example's
-  // GITHUB_WEBHOOK_SECRET_FILE line, and its empty file must not stop startup.
-  const secretFile = env.GITHUB_WEBHOOK_SECRET_FILE?.trim() ?? '';
+  // ── Webhook: App mode only ──
+  let webhookPort: number | null = null;
   let webhookSecret: string | null = null;
-  if (webhookPort === null) {
-    // listener off: no secret is needed, whatever the file holds
-  } else if (secretFile) {
-    webhookSecret = readSecretFile('GITHUB_WEBHOOK_SECRET_FILE', secretFile, problems);
+  if (authMode === 'token') {
+    if (env.GITHUB_WEBHOOK_PORT?.trim()) {
+      problems.push(
+        'GITHUB_WEBHOOK_PORT: not supported in contributor mode (GITHUB_TOKEN_FILE is set); contributor mode ' +
+          'has no webhook listener, only the notifications poller (GITHUB_POLL_INTERVAL_MS)',
+      );
+    }
   } else {
-    problems.push(
-      'GITHUB_WEBHOOK_SECRET_FILE: required when GITHUB_WEBHOOK_PORT is set (a delivery is only trusted after its signature is checked)',
-    );
+    webhookPort = readPort('GITHUB_WEBHOOK_PORT', env.GITHUB_WEBHOOK_PORT, problems);
+    // Read only when the listener is on: a polling install keeps the example's
+    // GITHUB_WEBHOOK_SECRET_FILE line, and its empty file must not stop startup.
+    const secretFile = env.GITHUB_WEBHOOK_SECRET_FILE?.trim() ?? '';
+    if (webhookPort === null) {
+      // listener off: no secret is needed, whatever the file holds
+    } else if (secretFile) {
+      webhookSecret = readSecretFile('GITHUB_WEBHOOK_SECRET_FILE', secretFile, problems);
+    } else {
+      problems.push(
+        'GITHUB_WEBHOOK_SECRET_FILE: required when GITHUB_WEBHOOK_PORT is set (a delivery is only trusted after its signature is checked)',
+      );
+    }
   }
 
   const webhookPath = env.GITHUB_WEBHOOK_PATH?.trim() || DEFAULT_WEBHOOK_PATH;
@@ -1151,9 +1547,25 @@ export function readConfig(env: Env = process.env): Config {
     problems.push(`GITHUB_WEBHOOK_PATH: must start with "/", got "${webhookPath}"`);
   }
 
+  // ── Poll interval: off-by-default in App mode (a webhook fallback), always
+  // on at the floor in contributor mode (its only ingress) ──
   let pollIntervalMs = 0;
   const rawPoll = env.GITHUB_POLL_INTERVAL_MS?.trim();
-  if (rawPoll) {
+  if (authMode === 'token') {
+    if (!rawPoll) {
+      pollIntervalMs = MIN_POLL_INTERVAL_MS;
+    } else {
+      const n = Number(rawPoll);
+      if (!Number.isInteger(n) || n < MIN_POLL_INTERVAL_MS) {
+        problems.push(
+          `GITHUB_POLL_INTERVAL_MS: must be at least ${MIN_POLL_INTERVAL_MS} ms in contributor mode (the ` +
+            `notifications poller is always on), got "${rawPoll}"`,
+        );
+      } else {
+        pollIntervalMs = n;
+      }
+    }
+  } else if (rawPoll) {
     const n = Number(rawPoll);
     if (!Number.isInteger(n) || n < 0) {
       problems.push(`GITHUB_POLL_INTERVAL_MS: must be 0 (off) or a positive integer, got "${rawPoll}"`);
@@ -1181,45 +1593,68 @@ export function readConfig(env: Env = process.env): Config {
     const slugs = repos.map(repoSlug);
     const dup = slugs.find((s, i) => slugs.indexOf(s) !== i);
     if (dup) problems.push(`GITHUB_REPOS: ${dup} is listed twice`);
-    const owners = [...new Set(repos.map((r) => r.owner))];
-    if (owners.length > 1) {
-      problems.push(
-        `GITHUB_REPOS: every repository must share one owner (one App installation, one token); ` +
-          `got ${owners.join(', ')}. Run one server per owner.`,
-      );
+    // App mode: one App installation is one token, so a second owner needs a
+    // second process. Contributor mode's one token already reaches every
+    // owner the user can, so it has no such restriction (the task's
+    // "GITHUB_REPOS may span several owners").
+    if (authMode === 'app') {
+      const owners = [...new Set(repos.map((r) => r.owner))];
+      if (owners.length > 1) {
+        problems.push(
+          `GITHUB_REPOS: every repository must share one owner (one App installation, one token); ` +
+            `got ${owners.join(', ')}. Run one server per owner.`,
+        );
+      }
     }
   }
 
-  const prBaseAllow = csv(env.GITHUB_PR_BASE_ALLOW);
-  for (const entry of prBaseAllow) {
-    const at = entry.indexOf(':');
-    if (at < 0) continue;
-    const scope = parseRepoSlug(entry.slice(0, at));
-    const branch = entry.slice(at + 1);
-    if (!scope || !branch) {
-      problems.push(`GITHUB_PR_BASE_ALLOW: "${entry}" is neither a branch nor owner/name:branch`);
-    } else if (repos.length > 0 && !repoAllowed(scope, repos)) {
-      problems.push(`GITHUB_PR_BASE_ALLOW: "${entry}" names a repository outside GITHUB_REPOS`);
+  const prBaseAllow = readBaseAllow('GITHUB_PR_BASE_ALLOW', env.GITHUB_PR_BASE_ALLOW, repos, problems);
+  const mergeBaseAllow = readBaseAllow('GITHUB_MERGE_BASE_ALLOW', env.GITHUB_MERGE_BASE_ALLOW, repos, problems);
+  const workflowAllow = readBaseAllow('GITHUB_WORKFLOW_ALLOW', env.GITHUB_WORKFLOW_ALLOW, repos, problems, 'workflow file');
+  for (const entry of workflowAllow) {
+    const file = entry.slice(entry.indexOf(':') + 1);
+    if (file && !isWorkflowFileName(file)) {
+      problems.push(`GITHUB_WORKFLOW_ALLOW: "${entry}" is not a workflow file name such as review.yml`);
     }
   }
 
+  // Contributor mode may leave it unset: startup takes the token's own login
+  // from `GET /user`, which it checks a set value against anyway.
   const botLogin = env.GITHUB_BOT_LOGIN?.trim() ?? '';
-  if (!botLogin) {
+  if (!botLogin && authMode === 'app') {
     problems.push('GITHUB_BOT_LOGIN: required (from-self and mention detection depend on it)');
   }
 
   if (problems.length > 0) throw new ConfigError(problems);
 
+  if (new Set(repos.map((repo) => repo.owner.toLowerCase())).size > 1) {
+    for (const [name, entries] of [
+      ['GITHUB_MERGE_BASE_ALLOW', mergeBaseAllow],
+      ['GITHUB_WORKFLOW_ALLOW', workflowAllow],
+    ] as const) {
+      if (entries.some((entry) => !entry.includes(':'))) {
+        logger.warn(
+          `${name}: unscoped entries apply to every repository in GITHUB_REPOS, including third-party ` +
+          `upstreams. Multiple owners are configured; use owner/name:value to limit each write permission.`,
+        );
+      }
+    }
+  }
+
   return {
+    authMode,
     appId,
-    privateKeyPem: privateKeyPem as string,
+    privateKeyPem,
     installationId,
+    userToken,
     webhookSecret,
     webhookPort,
     webhookPath,
     pollIntervalMs,
     repos,
     prBaseAllow,
+    mergeBaseAllow,
+    workflowAllow,
     stateFile: env.GITHUB_STATE_FILE?.trim() || null,
     botLogin,
     maintainers: csv(env.GITHUB_MAINTAINERS),

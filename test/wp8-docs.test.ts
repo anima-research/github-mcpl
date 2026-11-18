@@ -59,12 +59,15 @@ const RECIPES = ['examples/recipe-maintainer-clone.json', 'examples/recipe-contr
 
 // ─── 1. the App manifest ─────────────────────────────────────────────────────
 
-test('app-manifest.json lists exactly the permissions the tools need', () => {
+test('app-manifest.json lists exactly the permissions the default tools need', () => {
   const m = json('app-manifest.json');
+  // contents: write because GitHub refuses resolveReviewThread to an App
+  // without it; `actions` and `workflows` are added by hand for the opt-in
+  // github.actions and github.merge (README, Security).
   assert.deepEqual(m.default_permissions, {
     issues: 'write',
     pull_requests: 'write',
-    contents: 'read',
+    contents: 'write',
     checks: 'read',
     metadata: 'read',
   });

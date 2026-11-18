@@ -3,7 +3,7 @@
  * rendering support the write modules share (TASK-SRHKG.1.6).
  *
  * Tools: get_issue, get_pull_request, list_comments, list_review_threads,
- * list_pull_request_files, get_check_runs, search_issues. None of them writes
+ * list_pull_request_files, get_check_runs, search_issues, list_reviews. None of them writes
  * anything, so github.read is not rollback-capable.
  *
  * The shared argument helpers, the allow-list check and the failure formatting
@@ -31,14 +31,16 @@ import {
   TOOL_LIST_COMMENTS,
   TOOL_LIST_PULL_REQUEST_FILES,
   TOOL_LIST_REVIEW_THREADS,
+  TOOL_LIST_REVIEWS,
   TOOL_SEARCH_ISSUES,
   type ChecksSummary,
   type Comment,
   type Issue,
-  type IssueSearchHit,
+  type IssueSearch,
   type PullRequest,
   type PullRequestFile,
   type RepoRef,
+  type ReviewList,
   type ReviewThread,
   type ThreadKind,
   type ThreadRef,
@@ -173,6 +175,36 @@ export function renderReviewThreads(pull: ThreadRef, threads: readonly ReviewThr
   );
 }
 
+/**
+ * The newest reviews, oldest of them first, ending on the newest — which is
+ * the one a caller deciding whether to merge needs. When the history is longer
+ * than the bound, the adapter has already dropped the *oldest*; the line
+ * saying how many comes first.
+ */
+export function renderReviews(pull: ThreadRef, list: ReviewList): string {
+  const { total, reviews } = list;
+  if (total === 0 || reviews.length === 0) return `no reviews on ${ref(pull.repo, pull.number)}`;
+  const dropped = total - reviews.length;
+  return lines(
+    `${total} review${total === 1 ? '' : 's'} on ${ref(pull.repo, pull.number)}, oldest first`,
+    dropped > 0 && `… ${dropped} older not shown (list bound ${LIMITS.listEntries})`,
+    ...reviews.map((r) =>
+      lines(
+        `— id ${r.id} ${field(r.state)} by ${field(r.author.login)} at ${field(r.submittedAt || 'not submitted')} ` +
+          `on ${field(r.commitId.slice(0, 12), FIELD.sha)}  ${field(r.html_url, FIELD.url)}`,
+        r.body.trim() !== '' && bounded(r.body.trim(), REVIEW_BODY_CHARS),
+      ),
+    ),
+  );
+}
+
+/**
+ * A review summary in a list of up to fifty: long enough for a verdict line
+ * and the findings count, short enough that the list stays readable. The full
+ * text is one URL away.
+ */
+const REVIEW_BODY_CHARS = 600;
+
 export function renderFiles(pull: ThreadRef, files: readonly PullRequestFile[]): string {
   if (files.length === 0) return `no changed files on ${ref(pull.repo, pull.number)}`;
   return lines(
@@ -181,10 +213,14 @@ export function renderFiles(pull: ThreadRef, files: readonly PullRequestFile[]):
   );
 }
 
-export function renderSearchHits(repo: RepoRef, query: string, hits: readonly IssueSearchHit[]): string {
+export function renderSearchHits(repo: RepoRef, query: string, search: IssueSearch): string {
+  const { hits, outside } = search;
   // The query is the caller's own string coming back out: echoed, so bounded.
   const asked = `${field(repoSlug(repo), FIELD.slug)} for ${echo(query, FIELD.query)}`;
-  if (hits.length === 0) return `no matches in ${asked}`;
+  const leftOut =
+    outside > 0 &&
+    `${outside} result${outside === 1 ? '' : 's'} on this page from other repositories left out: a search stays inside ${field(repoSlug(repo), FIELD.slug)}`;
+  if (hits.length === 0) return lines(`no matches in ${asked}`, leftOut);
   return lines(
     `${hits.length} match${hits.length === 1 ? '' : 'es'} in ${asked}`,
     boundedList(
@@ -195,6 +231,7 @@ export function renderSearchHits(repo: RepoRef, query: string, hits: readonly Is
           FIELD.url,
         )}`,
     ),
+    leftOut,
   );
 }
 
@@ -281,10 +318,21 @@ export const readTools: ToolDefinition[] = [
     },
   },
   {
+    name: TOOL_LIST_REVIEWS,
+    description:
+      'List the reviews submitted on a pull request, oldest first and ending on the newest: verdict ' +
+      '(approved, changes_requested, commented, dismissed), reviewer, the head sha reviewed, and the summary.',
+    inputSchema: {
+      type: 'object',
+      properties: { repo: REPO_PROPERTY, number: { type: 'integer', minimum: 1, description: 'Pull-request number' } },
+      required: ['number'],
+    },
+  },
+  {
     name: TOOL_SEARCH_ISSUES,
     description:
       'Search issues and pull requests within the allowed repository. Takes GitHub search ' +
-      'syntax without the repo: qualifier, which is added for you.',
+      'syntax; repo:, user:, org: and owner: qualifiers are dropped, since the repository is added for you.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -325,6 +373,10 @@ async function callRead(name: string, args: Record<string, unknown>, ctx: ToolCo
     case TOOL_LIST_PULL_REQUEST_FILES: {
       const pull = resolveThread(args, ctx, 'pull');
       return toolResult(renderFiles(pull, await ctx.api.listPullRequestFiles(pull)));
+    }
+    case TOOL_LIST_REVIEWS: {
+      const pull = resolveThread(args, ctx, 'pull');
+      return toolResult(renderReviews(pull, await ctx.api.listReviews(pull)));
     }
     case TOOL_GET_CHECK_RUNS: {
       const repo = resolveRepo(args, ctx);

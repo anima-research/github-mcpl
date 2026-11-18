@@ -18,7 +18,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test, type TestContext } from 'node:test';
 import { method, type PushEventParams } from '@animalabs/mcpl-core';
-import { CheckGate, normalizeWebhook } from '../src/normalize.js';
+import { CheckGate, normalizeNotifiedReviewRequest, normalizePolledIssue, normalizeWebhook } from '../src/normalize.js';
 import { Poller } from '../src/poller.js';
 import { GithubState } from '../src/state.js';
 import { WebhookListener } from '../src/webhook.js';
@@ -30,6 +30,7 @@ import {
   silentLogger,
   type Comment,
   type NormalizedEvent,
+  type PolledIssue,
 } from '../src/types.js';
 import {
   FULL_GRANT,
@@ -140,7 +141,7 @@ const ERR_UNKNOWN_CHECKPOINT = -32005;
 // The handshake
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('the MCPL handshake answers the six feature-set declarations and MCP tools', async (t) => {
+test('the MCPL handshake answers the eight feature-set declarations and MCP tools', async (t) => {
   const h = rig(t);
   const result = await initialize(h, true);
   const manifest = (result.capabilities as { experimental: { mcpl: Record<string, unknown> } }).experimental.mcpl;
@@ -155,6 +156,8 @@ test('the MCPL handshake answers the six feature-set declarations and MCP tools'
     'github.review',
     'github.issues',
     'github.pr',
+    'github.merge',
+    'github.actions',
   ]);
   assert.equal(manifest.pushEvents, true);
   assert.deepEqual(manifest.channels, {
@@ -242,7 +245,7 @@ test('a host that grants nothing gets refusals on every tool, channel and push',
 
   const receipt = await grant(h, []);
   assert.equal(receipt.mode, 'degraded');
-  assert.equal(receipt.unavailableFeatures.length, 6, 'all six disabled');
+  assert.equal(receipt.unavailableFeatures.length, 8, 'all eight disabled');
 
   // Every tool, by name, from every module.
   assert.ok(h.server.toolDefinitions().length >= 20, 'the whole tool surface is registered');
@@ -269,7 +272,7 @@ test('a host that grants nothing gets refusals on every tool, channel and push',
   // "a host has to be able to see the surface it is deciding about" — which
   // was wrong twice over (WP9 review, finding 6): the surface a host decides
   // about is the *manifest's* feature-set declarations, which `initialize`
-  // already carried, and a listing that offers 22 tools while every call is
+  // already carried, and a listing that offers 28 tools while every call is
   // refused is a listing that lies.
   const listed = (await h.host.sendRequest('tools/list', {})) as { tools: { name: string }[] };
   assert.deepEqual(listed.tools, [], 'the empty allowlist offers no tool');
@@ -280,10 +283,10 @@ test('an unknown tool name is refused by name, before the grant is consulted', a
   await initialize(h, true);
   // No grant at all, so a capability answer would be the "available" one —
   // and a typo is still reported as a typo (§ the .9 brief).
-  const unknown = await refusal(callTool(h, 'merge_pull_request', {}));
+  const unknown = await refusal(callTool(h, 'force_push', {}));
   assert.equal(unknown.code, ERR_METHOD_NOT_FOUND);
-  assert.match(unknown.message, /Unknown tool: merge_pull_request/);
-  assert.deepEqual(unknown.data, { tool: 'merge_pull_request' });
+  assert.match(unknown.message, /Unknown tool: force_push/);
+  assert.deepEqual(unknown.data, { tool: 'force_push' });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -558,6 +561,76 @@ test('amendment 2a: a polled pull-request row with an unmoved head never reaches
     1,
     'the pull-request row was announced once, not once per comment',
   );
+});
+
+test('a polled merge reaches the host as github:pr=merged beside github:pr=closed, as a webhook\'s does', async (t) => {
+  const api = new FakeGitHubApi();
+  api.seedPullRequest({ number: 58 });
+  const h = rig(t, { api });
+  await initialize(h, true);
+  await grant(h);
+  const row: PolledIssue = {
+    id: 5800,
+    number: 58,
+    isPullRequest: true,
+    title: 'Fix it',
+    body: '',
+    state: 'closed',
+    author: { login: 'octocat', isBot: false },
+    createdAt: '2026-10-01T00:00:00Z',
+    updatedAt: '2026-10-13T12:00:00Z',
+    html_url: `https://github.com/${TEST_REPO.owner}/${TEST_REPO.name}/pull/58`,
+    closedBy: { login: 'maintainer', isBot: false },
+    closedAt: '2026-10-13T12:00:00Z',
+    merged: true,
+  };
+  const event = normalizePolledIssue(TEST_REPO, row, '2026-10-13T12:01:00.000Z', '2026-10-13T11:00:00Z');
+  assert.equal(event?.kind, 'pull.closed');
+  await h.server.onEvent(event as NormalizedEvent);
+  await until(() => pushes(h).length === 1, 'the merge');
+  const tags = pushes(h)[0]?.tags ?? [];
+  assert.ok(tags.includes('github:pr=closed'));
+  assert.ok(tags.includes('github:pr=merged'));
+
+  // A polled close that wasn't a merge is closed alone.
+  const closedOnly = normalizePolledIssue(TEST_REPO, { ...row, id: 5900, number: 59, merged: false }, '2026-10-13T12:01:00.000Z', '2026-10-13T11:00:00Z');
+  await h.server.onEvent(closedOnly as NormalizedEvent);
+  await until(() => pushes(h).length === 2, 'the close');
+  const closedTags = pushes(h)[1]?.tags ?? [];
+  assert.ok(closedTags.includes('github:pr=closed'));
+  assert.ok(!closedTags.includes('github:pr=merged'));
+
+  // And a webhook's merge still says so from its nested pull_request.merged.
+  const deliver = await webhook(t, h);
+  await deliver('pull_request', fixture('pull_request.closed.json'), 'merge-webhook-1');
+  await until(() => pushes(h).length === 3, 'the webhook merge');
+  assert.ok((pushes(h)[2]?.tags ?? []).includes('github:pr=merged'));
+});
+
+test('a review request from a notification reaches the host as github:pr=review_requested with isReviewRequested, as a webhook\'s does', async (t) => {
+  const api = new FakeGitHubApi();
+  api.seedPullRequest({ number: 58 });
+  const h = rig(t, { api });
+  await initialize(h, true);
+  await grant(h);
+  const row: PolledIssue = {
+    id: 5800,
+    number: 58,
+    isPullRequest: true,
+    title: 'Fix it',
+    body: '',
+    state: 'open',
+    author: { login: 'octocat', isBot: false },
+    createdAt: '2026-10-01T00:00:00Z',
+    updatedAt: '2026-10-13T12:00:00Z',
+    html_url: `https://github.com/${TEST_REPO.owner}/${TEST_REPO.name}/pull/58`,
+  };
+  const event = normalizeNotifiedReviewRequest(TEST_REPO, row, { id: '9001', updatedAt: '2026-10-13T12:00:20Z' }, '2026-10-13T12:01:00.000Z');
+  await h.server.onEvent(event);
+  await until(() => pushes(h).length === 1, 'the review request');
+  assert.ok((pushes(h)[0]?.tags ?? []).includes('github:pr=review_requested'));
+  const metadata = (pushes(h)[0].origin as { metadata: Record<string, unknown> }).metadata;
+  assert.equal(metadata.isReviewRequested, true, 'the notification names no reviewer, and its reason says it is the token user');
 });
 
 /** The `origin` a webhook issue delivery produces, for the shape comparison. */
