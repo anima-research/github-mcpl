@@ -17,8 +17,9 @@
 
 import * as net from 'node:net';
 import { McplConnection } from '@animalabs/mcpl-core';
-import { GitHubAdapter } from './github-adapter.js';
+import { GitHubAdapter, type GitHubAdapterOptions } from './github-adapter.js';
 import { CheckGate } from './normalize.js';
+import { RepoAvailability } from './repo-availability.js';
 import { Poller } from './poller.js';
 import { GitHubMcplServer } from './server.js';
 import { GithubState } from './state.js';
@@ -47,6 +48,7 @@ interface Running {
   webhook: WebhookListener | null;
   poller: Poller | null;
   state: GithubState;
+  availability: RepoAvailability;
 }
 
 /**
@@ -61,9 +63,9 @@ interface Running {
  * registration output deserves better than that. The original message is kept
  * after the colon; it carries no key material, only a decoder verdict.
  */
-function buildAdapter(config: Config, log: Logger): GitHubAdapter {
+function buildAdapter(config: Config, log: Logger, onRepositoryResolved: GitHubAdapterOptions['onRepositoryResolved']): GitHubAdapter {
   try {
-    return new GitHubAdapter(config, { logger: log });
+    return new GitHubAdapter(config, { logger: log, onRepositoryResolved });
   } catch (err) {
     log.error(
       'GITHUB_APP_PRIVATE_KEY_FILE: the file does not hold a usable RSA private key (expected a ' +
@@ -82,9 +84,18 @@ function buildAdapter(config: Config, log: Logger): GitHubAdapter {
  * pass for the same head would each emit their own event.
  */
 async function build(config: Config, log: Logger): Promise<{ server: GitHubMcplServer; running: Running }> {
-  const api = buildAdapter(config, log);
+  const adapter = buildAdapter(config, log, (repo, name) => availability.confirm(repo, name));
+  const availability: RepoAvailability = new RepoAvailability(
+    config.repos,
+    (repo) => adapter.getRepositoryName(repo),
+    (event) => server.onEvent(event),
+    log,
+  );
+  const api = availability.guard(adapter);
   const state = GithubState.load(config.stateFile, log);
   const server = new GitHubMcplServer(api, {
+    assertRepoAvailable: (repo) => availability.assertAvailable(repo),
+    repoAvailable: (repo) => availability.available(repo),
     botLogin: config.botLogin,
     repos: config.repos,
     maintainers: config.maintainers,
@@ -93,6 +104,7 @@ async function build(config: Config, log: Logger): Promise<{ server: GitHubMcplS
     logger: log,
   });
   registerTools(server);
+  await availability.initialize();
 
   const checkGate = new CheckGate();
   const webhook = webhookListenerFromConfig(config, {
@@ -111,6 +123,7 @@ async function build(config: Config, log: Logger): Promise<{ server: GitHubMcplS
       ? null
       : new Poller({
           api,
+          repoAvailable: (repo) => availability.available(repo),
           repos: config.repos,
           state,
           intervalMs: config.pollIntervalMs,
@@ -123,7 +136,8 @@ async function build(config: Config, log: Logger): Promise<{ server: GitHubMcplS
     log.info('polling', { intervalMs: config.pollIntervalMs });
   }
 
-  return { server, running: { webhook, poller, state } };
+  availability.start();
+  return { server, running: { webhook, poller, state, availability } };
 }
 
 /**
@@ -132,6 +146,7 @@ async function build(config: Config, log: Logger): Promise<{ server: GitHubMcplS
  */
 async function shutdown(running: Running, log: Logger): Promise<void> {
   running.poller?.stop();
+  await running.availability.stop();
   try {
     await running.poller?.whenIdle();
   } catch (err) {

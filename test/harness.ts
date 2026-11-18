@@ -465,13 +465,13 @@ export class FakeGitHubApi implements GitHubApi {
     return review;
   }
 
-  async resolveReviewThread(reviewThreadId: string): Promise<void> {
-    this.record('resolveReviewThread', reviewThreadId);
+  async resolveReviewThread(pull: ThreadRef, reviewThreadId: string): Promise<void> {
+    this.record('resolveReviewThread', pull, reviewThreadId);
     this.setResolved(reviewThreadId, true);
   }
 
-  async unresolveReviewThread(reviewThreadId: string): Promise<void> {
-    this.record('unresolveReviewThread', reviewThreadId);
+  async unresolveReviewThread(pull: ThreadRef, reviewThreadId: string): Promise<void> {
+    this.record('unresolveReviewThread', pull, reviewThreadId);
     this.setResolved(reviewThreadId, false);
   }
 
@@ -670,6 +670,8 @@ export function harness(opts: HarnessOptions = {}): Harness {
 
   const api = opts.api ?? new FakeGitHubApi();
   const server = new GitHubMcplServer(api, {
+    assertRepoAvailable: opts.assertRepoAvailable,
+    repoAvailable: opts.repoAvailable,
     botLogin: opts.botLogin ?? TEST_BOT.login,
     repos: opts.repos ?? [TEST_REPO],
     maintainers: opts.maintainers,

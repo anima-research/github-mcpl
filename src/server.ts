@@ -98,6 +98,9 @@ import {
 } from './types.js';
 
 export interface GitHubServerOptions {
+  /** Runtime availability checks; the configured allow-list itself never changes. */
+  assertRepoAvailable?: (repo: RepoRef) => void;
+  repoAvailable?: (repo: RepoRef) => boolean;
   /** GITHUB_BOT_LOGIN. From-self and mention detection depend on it. */
   botLogin?: string;
   /** GITHUB_REPOS, the write allow-list. */
@@ -638,6 +641,7 @@ export class GitHubMcplServer {
   toolContext(): ToolContext {
     return {
       api: this.api,
+      assertRepoAvailable: this.options.assertRepoAvailable,
       state: this.state,
       botLogin: this.options.botLogin ?? '',
       repos: this.options.repos ?? [],
@@ -800,6 +804,7 @@ export class GitHubMcplServer {
           this.requireMcpl('featureSets/update');
           const receipt = this.grant.apply(params as unknown as FeatureSetsUpdateParams, 'request');
           conn.sendResponse(req.id, receipt);
+          await this.flushAvailability();
           break;
         }
 
@@ -1172,7 +1177,10 @@ export class GitHubMcplServer {
    */
   private requireAllowedRepo(repo: RepoRef, what: string): void {
     const allowed = this.options.repos ?? [];
-    if (repoAllowed(repo, allowed)) return;
+    if (repoAllowed(repo, allowed)) {
+      this.options.assertRepoAvailable?.(repo);
+      return;
+    }
     throw new McplRpcError(
       ERR_INVALID_PARAMS,
       `${what}: repository ${repoSlug(repo)} is not in GITHUB_REPOS (allowed: ${
@@ -1204,12 +1212,22 @@ export class GitHubMcplServer {
     const registry = this.registry();
     if (params.channelId) {
       const known = registry.get(params.channelId);
-      if (known) return { channel: known };
+      if (known) {
+        const knownThread = threadFromAddress(known.address);
+        if (!knownThread) throw new McplRpcError(ERR_INVALID_PARAMS, 'channel has no repository address');
+        this.requireAllowedRepo(knownThread.repo, 'channels/open');
+        return { channel: known };
+      }
     }
     const thread = threadFromAddress(params.address);
     if (thread) {
       const known = registry.get(channelId(thread));
-      if (known) return { channel: known };
+      if (known) {
+        const knownThread = threadFromAddress(known.address);
+        if (!knownThread) throw new McplRpcError(ERR_INVALID_PARAMS, 'channel has no repository address');
+        this.requireAllowedRepo(knownThread.repo, 'channels/open');
+        return { channel: known };
+      }
       this.require('channels.register');
       this.requireAllowedRepo(thread.repo, 'channels/open');
       // The address's `kind` is the host's claim, and the host is guessing as
@@ -1284,17 +1302,52 @@ export class GitHubMcplServer {
    * poller take this as their `onEvent`, so one pipeline tags, renders and
    * forwards whatever arrived, however it arrived.
    */
-  readonly onEvent = (event: NormalizedEvent): Promise<void> => this.handleEvent(event);
+  // At most one pending availability state and one rename notice per configured repo. Startup precedes the grant;
+  // retain the latest state until a host can accept it, not a stale outage history.
+  private readonly pendingAvailability = new Map<string, NormalizedEvent>();
+  private flushingAvailability: Promise<void> | null = null;
 
-  private async handleEvent(event: NormalizedEvent): Promise<void> {
+  readonly onEvent = async (event: NormalizedEvent): Promise<void> => {
+    if (event.availability || event.installation) {
+      const key = event.installation ? 'installation' : `${repoSlug(event.repo)}:${event.kind === 'repo.renamed' ? 'renamed' : 'availability'}`;
+      this.pendingAvailability.set(key, event);
+      await this.flushAvailability();
+    } else {
+      await this.flushAvailability();
+      if (this.options.repoAvailable && !this.options.repoAvailable(event.repo)) return;
+      await this.handleEvent(event);
+    }
+  };
+
+  private flushAvailability(): Promise<void> {
+    if (this.flushingAvailability) return this.flushingAvailability;
+    this.flushingAvailability = (async () => {
+      for (const slug of this.pendingAvailability.keys()) {
+        let event = this.pendingAvailability.get(slug);
+        while (event) {
+          const delivered = await this.handleEvent(event);
+          const latest = this.pendingAvailability.get(slug);
+          if (latest !== event) {
+            event = latest;
+            continue;
+          }
+          if (delivered) this.pendingAvailability.delete(slug);
+          break;
+        }
+      }
+    })().finally(() => { this.flushingAvailability = null; });
+    return this.flushingAvailability;
+  }
+
+  private async handleEvent(event: NormalizedEvent): Promise<boolean> {
     const conn = this.conn;
     // Plain MCP has no push and no channels: an event has nowhere to go.
-    if (!conn || !this.mcplEnabled) return;
+    if (!conn || !this.mcplEnabled) return false;
     // Nothing to do at all. Each egress is asked again at its own send, so
     // this is only the cheap way out of an event no path wants: see
     // {@link GitHubMcplServer.eventEgressAllowed} for why the answer here is
     // never the one the sends rely on.
-    if (!this.eventEgressAllowed(conn, 'push') && !this.eventEgressAllowed(conn, 'incoming')) return;
+    if (!this.eventEgressAllowed(conn, 'push') && !this.eventEgressAllowed(conn, 'incoming')) return false;
 
     let tags: string[];
     let metadata: EventMetadata;
@@ -1307,7 +1360,7 @@ export class GitHubMcplServer {
       content = renderEvent(event);
     } catch (err) {
       this.logger.error('event pipeline failed', { event: event.id, error: (err as Error).message });
-      return;
+      return false;
     }
 
     // A top-level comment that is *gone* is a removal, whoever removed it and
@@ -1363,7 +1416,7 @@ export class GitHubMcplServer {
     // push/event for *every* event — including the ones with no thread (a
     // push, a repository-level change), which belong to no channel at all.
     // Re-asked after the channel delivery, which awaited the host.
-    if (!this.eventEgressAllowed(conn, 'push')) return;
+    if (!this.eventEgressAllowed(conn, 'push')) return false;
     const params: PushEventParams = {
       featureSet: EVENTS_FEATURE_SET,
       eventId: event.id,
@@ -1388,9 +1441,11 @@ export class GitHubMcplServer {
       payload: { content },
     };
     try {
-      await conn.sendRequest(method.PUSH_EVENT, params);
+      const receipt = await conn.sendRequest(method.PUSH_EVENT, params) as { accepted?: boolean };
+      return receipt?.accepted !== false;
     } catch (err) {
       this.logger.warn('push/event failed', { event: event.id, error: (err as Error).message });
+      return false;
     }
   }
 

@@ -61,6 +61,7 @@ export interface IngressState {
 
 export interface PollerOptions {
   api: PollerApi;
+  repoAvailable?: (repo: RepoRef) => boolean;
   repos: readonly RepoRef[];
   state: IngressState;
   intervalMs: number;
@@ -124,6 +125,7 @@ function atSecond(iso: string): string {
 
 export class Poller {
   private readonly api: PollerApi;
+  private readonly repoAvailable: (repo: RepoRef) => boolean;
   private readonly repos: readonly RepoRef[];
   private readonly state: IngressState;
   private readonly configuredIntervalMs: number;
@@ -142,6 +144,7 @@ export class Poller {
 
   constructor(opts: PollerOptions) {
     this.api = opts.api;
+    this.repoAvailable = opts.repoAvailable ?? (() => true);
     this.repos = opts.repos;
     this.state = opts.state;
     this.configuredIntervalMs = opts.intervalMs;
@@ -221,8 +224,25 @@ export class Poller {
 
     const candidates: Candidate[] = [];
     const cursors: Record<string, PollCursor> = {};
+    let collectionFailed = 0;
     for (const repo of this.repos) {
-      candidates.push(...(await this.collectRows(repo, since, startSecond, receivedAt, cursors)));
+      // Preserve each disabled/failed list's window so recovery catches up,
+      // while healthy siblings advance independently.
+      for (const list of ['issues', 'issue_comments', 'review_comments'] as const) {
+        const key = pollCursorKey(repo, list);
+        cursors[key] = this.state.pollCursors()[key] ?? { since };
+      }
+      if (!this.repoAvailable(repo)) continue;
+      const next: Record<string, PollCursor> = {};
+      try {
+        candidates.push(...(await this.collectRows(repo, since, startSecond, receivedAt, next)));
+        Object.assign(cursors, next);
+      } catch (err) {
+        collectionFailed++;
+        this.logger.warn('repository poll failed; its cursors are held back', {
+          repo: repoSlug(repo), error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
     const checks = await this.drainHeadBacklog(receivedAt);
     candidates.push(...checks.candidates);
@@ -233,7 +253,7 @@ export class Poller {
       since,
       delivered: [],
       duplicates: 0,
-      failed: 0,
+      failed: collectionFailed,
       cursorAdvanced: false,
       checkLookups: checks.lookups,
       checksBacklog: 0,
@@ -241,6 +261,7 @@ export class Poller {
     const deliveredThisPass = new Set<string>();
 
     for (const candidate of candidates) {
+      if (!this.repoAvailable(candidate.event.repo)) continue;
       const retire = (): void => {
         if (candidate.retires !== undefined) this.backlog.delete(candidate.retires);
       };
@@ -292,9 +313,17 @@ export class Poller {
 
     result.checksBacklog = this.backlog.size;
 
-    if (result.failed === 0) {
+    if (result.failed === collectionFailed) {
+      // A later checks lookup may have disabled a repo whose rows we collected.
+      for (const repo of this.repos) {
+        if (this.repoAvailable(repo)) continue;
+        for (const list of ['issues', 'issue_comments', 'review_comments'] as const) {
+          const key = pollCursorKey(repo, list);
+          cursors[key] = this.state.pollCursors()[key] ?? { since };
+        }
+      }
       this.state.setPollCursors(cursors);
-      const stops = Object.values(cursors).flatMap((cursor) => cursor.resumeAt ?? []);
+      const stops = Object.values(cursors).flatMap((cursor) => cursor.resumeAt ?? cursor.since);
       this.state.setLastPollAt([startSecond, ...stops].reduce((a, b) => (Date.parse(b) < Date.parse(a) ? b : a)));
       const remembered: Record<string, Record<string, string>> = {};
       for (const [list, rows] of Object.entries(this.state.polledNew())) {
@@ -400,7 +429,7 @@ export class Poller {
   }
 
   private async drainHeadBacklog(receivedAt: string): Promise<{ candidates: Candidate[]; lookups: number }> {
-    const due = [...this.backlog.values()].slice(0, this.maxCheckedPulls);
+    const due = [...this.backlog.values()].filter((head) => this.repoAvailable(head.repo)).slice(0, this.maxCheckedPulls);
     if (this.backlog.size > due.length) {
       this.logger.info('poll check lookups capped; the rest of the backlog waits for the next pass', {
         cap: this.maxCheckedPulls,

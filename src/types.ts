@@ -39,7 +39,8 @@ export function repoSlug(repo: RepoRef): string {
 
 /** Parse `owner/name`. Returns null for anything else (no guessing). */
 export function parseRepoSlug(slug: string): RepoRef | null {
-  const m = /^([^/\s]+)\/([^/\s]+)$/.exec(slug.trim());
+  const m = /^([A-Za-z0-9][A-Za-z0-9-]*)\/([A-Za-z0-9_.-]+)$/.exec(slug.trim());
+  if (m && (m[2] === '.' || m[2] === '..')) return null;
   return m ? { owner: m[1], name: m[2] } : null;
 }
 
@@ -83,7 +84,12 @@ export type NormalizedEventKind =
   | 'review_comment.created'
   | 'review_comment.edited'
   | 'checks.completed'
-  | 'push';
+  | 'push'
+  | 'installation.unavailable'
+  | 'installation.available'
+  | 'repo.unavailable'
+  | 'repo.available'
+  | 'repo.renamed';
 
 export const NORMALIZED_EVENT_KINDS: readonly NormalizedEventKind[] = [
   'issue.opened',
@@ -103,6 +109,11 @@ export const NORMALIZED_EVENT_KINDS: readonly NormalizedEventKind[] = [
   'review_comment.edited',
   'checks.completed',
   'push',
+  'installation.unavailable',
+  'installation.available',
+  'repo.unavailable',
+  'repo.available',
+  'repo.renamed',
 ] as const;
 
 export type ReviewState = 'approved' | 'changes_requested' | 'commented';
@@ -164,6 +175,8 @@ export interface NormalizedEvent {
     diffHunk: string;
     inReplyTo?: number;
   };
+  installation?: { reason: string; status?: number; operation?: string };
+  availability?: { reason: string; canonicalName?: string };
   checks?: { conclusion: CheckConclusion | null; failed: FailedCheck[] };
   /** Never forwarded to the model, never copied into metadata. */
   raw?: unknown;
@@ -442,8 +455,8 @@ export interface GitHubApi {
 
   // ── Review ──
   createReview(pull: ThreadRef, input: CreateReviewInput): Promise<SubmittedReview>;
-  resolveReviewThread(reviewThreadId: string): Promise<void>;
-  unresolveReviewThread(reviewThreadId: string): Promise<void>;
+  resolveReviewThread(pull: ThreadRef, reviewThreadId: string): Promise<void>;
+  unresolveReviewThread(pull: ThreadRef, reviewThreadId: string): Promise<void>;
 
   // ── Issues ──
   createIssue(repo: RepoRef, input: CreateIssueInput): Promise<Issue>;
@@ -522,6 +535,7 @@ export interface ToolResult {
 /** What a tool call may reach. Nothing here is global state. */
 export interface ToolContext {
   api: GitHubApi;
+  assertRepoAvailable?: (repo: RepoRef) => void;
   state: StateStore;
   /** GITHUB_BOT_LOGIN — from-self and own-comment checks. */
   botLogin: string;
@@ -768,6 +782,11 @@ export const GITHUB_TAGS = [
   'github:review-comment',
   'github:ci=success',
   'github:ci=failure',
+  'github:installation=unavailable',
+  'github:installation=available',
+  'github:repo=unavailable',
+  'github:repo=available',
+  'github:repo=renamed',
   'github:push',
   'github:actor=maintainer',
 ] as const;
@@ -777,6 +796,9 @@ export const GITHUB_TAGS = [
  * bounded scalar fields. Raw payloads never reach here.
  */
 export interface EventMetadata {
+  repoUnavailable?: boolean;
+  reason?: string;
+  canonicalName?: string;
   mentioned: boolean;
   isOwnThread: boolean;
   isReplyToSelf: boolean;

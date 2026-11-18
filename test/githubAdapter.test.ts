@@ -23,6 +23,7 @@ import { join } from 'node:path';
 import { after, test } from 'node:test';
 import {
   GitHubAdapter,
+  type GitHubAdapterOptions,
   GitHubApiError,
   POLL_MAX_PAGES,
   POLL_PR_HEAD_LIMIT,
@@ -31,6 +32,7 @@ import {
   summarizeChecks,
 } from '../src/github-adapter.js';
 import { Poller } from '../src/poller.js';
+import { RepoAvailability } from '../src/repo-availability.js';
 import { GithubState } from '../src/state.js';
 import {
   readConfig,
@@ -215,6 +217,7 @@ function defaultRoutes(fake: FakeGitHub, tokenExpiresInMs = 3_600_000, token = T
       status: 201,
       body: { token, expires_at: new Date(Date.now() + tokenExpiresInMs).toISOString() },
     }))
+    .on(`GET ${r}`, { body: { full_name: 'anima-research/rayforce' } })
     .on(`GET ${r}/installation`, { body: { id: INSTALLATION_ID } })
     .on('GET /app', { body: { id: 777, slug: 'rayforce-clone', name: 'Rayforce Clone' } })
     .on(`GET ${r}/issues/7`, { body: ISSUE_PAYLOAD })
@@ -239,7 +242,7 @@ function defaultRoutes(fake: FakeGitHub, tokenExpiresInMs = 3_600_000, token = T
     .on(`POST ${r}/pulls/12/comments/555/replies`, { status: 201, body: { ...COMMENT_PAYLOAD, id: 556, path: 'a.ts', in_reply_to_id: 555 } })
     .on(`POST ${r}/pulls/12/requested_reviewers`, { status: 201, body: PULL_PAYLOAD })
     .on(`GET ${r}/commits/${HEAD_SHA}/check-runs`, { body: { total_count: 0, check_runs: [] } })
-    .on('GET /search/issues', { body: { total_count: 1, items: [{ ...ISSUE_PAYLOAD, pull_request: { url: 'x' } }] } })
+    .on('GET /search/issues', () => ({ body: { total_count: 1, items: [{ ...ISSUE_PAYLOAD, repository_url: `${fake.baseUrl}${r}`, pull_request: { url: 'x' } }] } }))
     .on(`GET ${r}/issues`, { body: [] })
     .on(`GET ${r}/issues/comments`, { body: [] })
     .on(`GET ${r}/pulls/comments`, { body: [] })
@@ -262,6 +265,7 @@ const rigs: Rig[] = [];
 
 async function rig(
   options: {
+    onRepositoryResolved?: GitHubAdapterOptions['onRepositoryResolved'];
     tokenExpiresInMs?: number;
     env?: Record<string, string | undefined>;
     /** Override the minted token, e.g. with a form no pattern would catch. */
@@ -288,6 +292,7 @@ async function rig(
 
   const adapter = new GitHubAdapter(config(options.env), {
     baseUrl: fake.baseUrl,
+    onRepositoryResolved: options.onRepositoryResolved,
     logger,
     sleep: async (ms) => {
       sleeps.push(ms);
@@ -607,6 +612,7 @@ test('listReviewThreads maps reviewThreads, isResolved and the comment chain', a
     body: {
       data: {
         repository: {
+          nameWithOwner: 'Anima-Research/Rayforce',
           pullRequest: {
             reviewThreads: {
               nodes: [
@@ -703,11 +709,17 @@ test('listReviewThreads maps reviewThreads, isResolved and the comment chain', a
 
 test('resolve and unresolve send their mutations with the thread node id', async () => {
   const r = await rig();
-  r.fake.on('POST /graphql', { body: { data: { resolveReviewThread: { thread: { id: 'PRRT_x', isResolved: true } } } } });
-  await r.adapter.resolveReviewThread('PRRT_x');
-  await r.adapter.unresolveReviewThread('PRRT_x');
+  r.fake.on('POST /graphql', (req) => ({ body: { data: String(req.body.query).startsWith('query')
+    ? { node: { pullRequest: { number: 12, repository: { nameWithOwner: 'anima-research/rayforce' } } } }
+    : { resolveReviewThread: { thread: { id: 'PRRT_x', isResolved: true } } },
+  } }));
+  await r.adapter.resolveReviewThread(PULL, 'PRRT_x');
+  await r.adapter.unresolveReviewThread(PULL, 'PRRT_x');
 
-  const sent = r.fake.for('POST /graphql');
+  const all = r.fake.for('POST /graphql');
+  assert.equal(all.length, 4);
+  assert.match(String(all[0].body.query), /node\(id:\$threadId\).*PullRequestReviewThread/s);
+  const sent = all.filter((req) => String(req.body.query).startsWith('mutation'));
   assert.equal(sent.length, 2);
   assert.match(String(sent[0].body.query), /mutation.*resolveReviewThread\(input:\{threadId:\$threadId\}\)/s);
   assert.deepEqual(sent[0].body.variables, { threadId: 'PRRT_x' });
@@ -2032,3 +2044,402 @@ test('retention is by validity, so a credential GitHub would refuse is not kept 
     'a long-expired token is not retained; expiry is what bounds the set',
   );
 });
+
+test('repository metadata follows a safe redirect only to report the canonical name', async () => {
+  const r = await rig();
+  r.fake.on('GET /repos/anima-research/rayforce', {
+    status: 301, headers: { location: `${r.fake.baseUrl}/repositories/123` }, body: { message: 'Moved Permanently' },
+  });
+  r.fake.on('GET /repositories/123', { body: { full_name: 'new-owner/rayforce' } });
+  assert.equal(await r.adapter.getRepositoryName(REPO), 'new-owner/rayforce');
+  assert.equal(r.fake.for('GET /repositories/123').length, 1);
+  assertNoTokenLeak(r);
+});
+
+test('repository reads and writes retain upstream fetch redirect behavior across a transfer', async () => {
+  const r = await rig();
+  for (const method of ['GET', 'POST']) {
+    const path = method === 'GET' ? '/issues/7' : '/issues/7/comments';
+    // 307 preserves a write's method/body, exactly as upstream fetch does.
+    r.fake.on(`${method} /repos/anima-research/rayforce${path}`, {
+      status: 307, headers: { location: `${r.fake.baseUrl}/repos/new-owner/rayforce${path}` }, body: {},
+    });
+    r.fake.on(`${method} /repos/new-owner/rayforce${path}`, { body: method === 'GET' ? ISSUE_PAYLOAD : COMMENT_PAYLOAD });
+    if (method === 'GET') assert.equal((await r.adapter.getIssue(ISSUE)).number, 7);
+    else assert.equal((await r.adapter.createComment(ISSUE, 'follow upstream')).id, 555);
+    const redirected = r.fake.for(`${method} /repos/new-owner/rayforce${path}`);
+    assert.equal(redirected.length, 1);
+    if (method === 'POST') assert.equal(redirected[0].body.body, 'follow upstream');
+  }
+});
+
+test('metadata redirects cannot send credentials off-host or to non-metadata endpoints', async () => {
+  const r = await rig();
+  for (const location of ['https://attacker.invalid/repositories/123', `${r.fake.baseUrl}/repos/new/repo/issues`]) {
+    r.fake.on('GET /repos/anima-research/rayforce', { status: 301, headers: { location }, body: {} });
+    await assert.rejects(r.adapter.getRepositoryName(REPO), /unsafe repository redirect/);
+  }
+});
+
+test('installation discovery skips an unavailable first entry', async () => {
+  const r = await rig({ env: { GITHUB_APP_INSTALLATION_ID: undefined, GITHUB_REPOS: 'anima-research/missing,anima-research/rayforce' } });
+  r.fake.on('GET /repos/anima-research/missing/installation', { status: 404, body: { message: 'Not Found' } });
+  r.fake.on('GET /repos/anima-research/rayforce', { body: { full_name: 'anima-research/rayforce' } });
+  assert.equal(await r.adapter.getRepositoryName(REPO), 'anima-research/rayforce');
+  assert.equal(r.fake.for('GET /repos/anima-research/missing/installation').length, 1);
+  assert.equal(r.fake.for('GET /repos/anima-research/rayforce/installation').length, 1);
+});
+
+test('runtime transfer preserves redirected reads and emits a rename on the next metadata check', async () => {
+  const r = await rig();
+  const events: NormalizedEvent[] = [];
+  r.fake.on('GET /repos/anima-research/rayforce', { body: { full_name: 'anima-research/rayforce' } });
+  const availability = new RepoAvailability([REPO], (repo) => r.adapter.getRepositoryName(repo), async (event) => { events.push(event); });
+  await availability.initialize();
+  const api = availability.guard(r.adapter);
+  r.fake.on('GET /repos/anima-research/rayforce/issues/7', {
+    status: 301, headers: { location: `${r.fake.baseUrl}/repositories/123/issues/7` }, body: {},
+  });
+  r.fake.on('GET /repos/anima-research/rayforce', {
+    status: 301, headers: { location: `${r.fake.baseUrl}/repositories/123` }, body: {},
+  });
+  r.fake.on('GET /repositories/123', { body: { full_name: 'new-owner/rayforce' } });
+  r.fake.on('GET /repositories/123/issues/7', { body: ISSUE_PAYLOAD });
+  assert.equal((await api.getIssue(ISSUE)).number, 7);
+  await availability.recheck();
+  assert.equal(availability.available(REPO), true);
+  assert.equal((await api.getIssue(ISSUE)).number, 7);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].availability?.canonicalName, 'new-owner/rayforce');
+  assert.equal(events[0].kind, 'repo.renamed');
+  assert.equal(r.fake.for('GET /repos/anima-research/rayforce/issues/7').length, 2);
+  assert.equal(r.fake.for('GET /repositories/123/issues/7').length, 2);
+});
+
+for (const operation of ['search', 'resolve_thread', 'unresolve_thread'] as const) {
+  test(`${operation}: rename after metadata snapshot accepts only the target the configured entry now resolves to`, async () => {
+    let a!: RepoAvailability;
+    const r = await rig({ onRepositoryResolved: (repo, name) => a.confirm(repo, name) });
+    let renamed = false;
+    const events: NormalizedEvent[] = [];
+    r.fake.on('GET /repos/anima-research/rayforce', (_req, nth) => {
+      const full_name = renamed ? 'transferred-owner/renamed' : 'anima-research/rayforce';
+      if (nth === 1) renamed = true; // Transfer lands AFTER successful preflight.
+      return { body: { full_name } };
+    });
+    r.fake.on('GET /search/issues', () => {
+      assert.equal(renamed, true);
+      return { body: { items: [{ ...ISSUE_PAYLOAD, repository_url: `${r.fake.baseUrl}/repos/transferred-owner/renamed` }] } };
+    });
+    r.fake.on('POST /graphql', (req) => {
+      assert.equal(renamed, true);
+      if (String(req.body.query).startsWith('mutation')) return { body: { data: {} } };
+      if (String(req.body.query).includes('node(id:')) return { body: { data: { node: { pullRequest: {
+        number: 12, repository: { nameWithOwner: 'transferred-owner/renamed' },
+      } } } } };
+      return { body: { data: { repository: { nameWithOwner: 'transferred-owner/renamed',
+        pullRequest: { reviewThreads: { nodes: [{ id: 'RENAMED_NODE', comments: { nodes: [] } }] } },
+      } } } };
+    });
+    a = new RepoAvailability([REPO], (repo) => r.adapter.getRepositoryName(repo), async (e) => { events.push(e); });
+    await a.initialize();
+    const api = a.guard(r.adapter);
+    if (operation === 'search') {
+      assert.equal((await api.searchIssues(REPO, 'test')).length, 1);
+    } else {
+      const { reviewToolModule } = await import('../src/tools-review.js');
+      const result = await reviewToolModule.call(operation, { number: 12, threadId: 'RENAMED_NODE' }, {
+        api, repos: [REPO], prBaseAllow: [], botLogin: 'bot', state: GithubState.load(null), logger: silentLogger(),
+      });
+      assert.notEqual(result.isError, true);
+    }
+    assert.equal(r.fake.for('POST /graphql').filter((req) => String(req.body.query).startsWith('mutation')).length, operation === 'search' ? 0 : 1);
+    assert.equal(a.available(REPO), true);
+    assert.deepEqual(events.map((e) => e.kind), ['repo.renamed']);
+    assert.equal(events[0].availability?.canonicalName, 'transferred-owner/renamed');
+  });
+}
+
+for (const method of ['resolveReviewThread', 'unresolveReviewThread'] as const) {
+  test(`${method} validates actual node repository and pull immediately before mutation`, async () => {
+    const r = await rig();
+    for (const pull of [
+      { number: 12, repository: { nameWithOwner: 'anima-research/renamed' } },
+      { number: 99, repository: { nameWithOwner: 'anima-research/rayforce' } },
+      { number: 12 },
+    ]) {
+      r.fake.on('POST /graphql', { body: { data: { node: { pullRequest: pull } } } });
+      await assert.rejects(r.adapter[method](PULL, 'PRRT_x'), /identity|does not belong/);
+    }
+    assert.equal(r.fake.for('POST /graphql').filter((req) => String(req.body.query).startsWith('mutation')).length, 0);
+    const a = new RepoAvailability([REPO], async () => { throw Object.assign(new Error('gone'), { status: 404 }); }, async () => {});
+    await a.initialize();
+    const before = r.fake.calls.length;
+    await assert.rejects(a.guard(r.adapter)[method](PULL, 'PRRT_x'), /unavailable/);
+    assert.equal(r.fake.calls.length, before, 'availability guard scopes mutations too');
+  });
+}
+
+test('Search and GraphQL fail closed when the data omits repository identity', async () => {
+  const r = await rig();
+  r.fake.on('GET /search/issues', { body: { items: [ISSUE_PAYLOAD] } });
+  await assert.rejects(r.adapter.searchIssues(REPO, 'test'), /omitted repository identity/);
+  r.fake.on('POST /graphql', { body: { data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } } });
+  await assert.rejects(r.adapter.listReviewThreads(PULL), /omitted repository identity/);
+});
+
+for (const answer of [
+  { status: 403, headers: { 'retry-after': '1000' }, body: { message: 'secondary rate limit' } },
+  { status: 403, headers: { 'x-ratelimit-remaining': '0' }, body: { message: 'rate limit exceeded' } },
+  { status: 429, body: { message: 'too many requests' } },
+  { status: 503, body: { message: 'unavailable' } },
+] as Answer[]) {
+  test(`metadata ${answer.status} (${JSON.stringify(answer.headers ?? {})}) is transient through the real adapter`, async () => {
+    const r = await rig();
+    const events: NormalizedEvent[] = [];
+    r.fake.on('GET /repos/anima-research/rayforce', { body: { full_name: 'anima-research/rayforce' } });
+    const a = new RepoAvailability([REPO], (repo) => r.adapter.getRepositoryName(repo), async (e) => { events.push(e); });
+    await a.initialize();
+    r.fake.on('GET /repos/anima-research/rayforce', answer);
+    await a.recheck();
+    assert.equal(a.available(REPO), true);
+    assert.deepEqual(events, []);
+    await a.guard(r.adapter).getIssue(ISSUE);
+  });
+}
+
+for (const method of ['resolveReviewThread', 'unresolveReviewThread'] as const) {
+  for (const status of [401, 403, 429]) {
+    test(`${method} does not retry HTTP ${status} with a stale scope decision`, async () => {
+      const r = await rig();
+      const events: NormalizedEvent[] = [];
+      let gone = false;
+      let mutations = 0;
+      let scopeQueries = 0;
+      r.fake.on('GET /repos/anima-research/rayforce', () => gone
+        ? { status: 404, body: { message: 'Not Found' } }
+        : { body: { full_name: 'anima-research/rayforce' } });
+      const a = new RepoAvailability([REPO], (repo) => r.adapter.getRepositoryName(repo), async (e) => { events.push(e); });
+      await a.initialize();
+      r.fake.on('POST /graphql', async (req) => {
+        if (String(req.body.query).trim().startsWith('query')) {
+          scopeQueries++;
+          return { body: { data: { node: { pullRequest: {
+            number: PULL.number, repository: { nameWithOwner: 'anima-research/rayforce' },
+          } } } } };
+        }
+        mutations++;
+        if (mutations > 1) return { body: { data: {} } }; // Would be an out-of-scope write.
+        gone = true;
+        await a.recheck(); // Quarantined before the rejected mutation can be retried.
+        return { status, headers: { 'retry-after': '60' }, body: { message: 'rejected' } };
+      });
+      const api = a.guard(r.adapter);
+      await assert.rejects(api[method](PULL, 'PRRT_x'), status === 429 ? /GitHub 429/ : /unavailable/);
+      assert.equal(mutations, 1);
+      assert.equal(scopeQueries, 1);
+      assert.deepEqual(r.sleeps, [], 'no backoff for a mutation that cannot safely be retried');
+      assert.equal(r.fake.for(`POST /app/installations/${INSTALLATION_ID}/access_tokens`).length, 1);
+      assert.equal(a.available(REPO), false);
+      assert.deepEqual(events.map((e) => e.kind), ['repo.unavailable']);
+      await assert.rejects(api[method](PULL, 'PRRT_x'), /unavailable/);
+      assert.equal(mutations, 1, 'explicit reinvocation also honors quarantine');
+    });
+  }
+}
+
+for (const scenario of ['503', '429', '403 headers', '403 message', 'network', 'missing id']) {
+  for (const reversed of [false, true]) {
+    test(`a sibling discovery 404 cannot turn ${scenario} into an outage (reversed=${reversed})`, async (t) => {
+      t.mock.timers.enable({ apis: ['Date', 'setInterval'] });
+      const working = { owner: 'anima-research', name: 'working' };
+      const gone = { owner: 'anima-research', name: 'gone' };
+      const repos = reversed ? [gone, working] : [working, gone];
+      let recovered = false;
+      let discoveries = 0;
+      let metadataRequests = 0;
+      const adapter = new GitHubAdapter({ ...config(), installationId: null, repos }, {
+        logger: silentLogger(),
+        fetch: async (input) => {
+          const path = new URL(String(input)).pathname;
+          if (path.endsWith('/installation')) {
+            discoveries++;
+            if (path === '/repos/anima-research/gone/installation') {
+              return Response.json({ message: 'missing' }, { status: 404 });
+            }
+            if (recovered) return Response.json({ id: INSTALLATION_ID });
+            if (scenario === 'network') throw new Error('network unavailable');
+            if (scenario === 'missing id') return Response.json({});
+            const status = scenario === '503' ? 503 : scenario === '429' ? 429 : 403;
+            return Response.json({ message: scenario === '403 message' ? 'rate limit exceeded' : 'temporary' }, {
+              status, headers: scenario === '403 headers' ? { 'x-ratelimit-remaining': '0' } : {},
+            });
+          }
+          if (path === `/app/installations/${INSTALLATION_ID}/access_tokens`) {
+            return Response.json({ token: TOKEN, expires_at: new Date(Date.now() + 3_600_000).toISOString() });
+          }
+          metadataRequests++;
+          if (path === '/repos/anima-research/gone') return Response.json({ message: 'missing' }, { status: 404 });
+          assert.equal(path, '/repos/anima-research/working');
+          return Response.json({ full_name: 'anima-research/working' });
+        },
+      });
+      const events: NormalizedEvent[] = [];
+      const a = new RepoAvailability(repos, (repo) => adapter.getRepositoryName(repo), async (e) => { events.push(e); });
+      t.after(() => a.stop());
+      await a.initialize();
+      assert.equal(discoveries, 2, 'one shared discovery traversal');
+      assert.equal(metadataRequests, 0, 'neither repository has given definitive metadata evidence');
+      assert.equal(events.length, 0, 'inconclusive discovery must not emit repository or installation outages');
+      await assert.rejects(adapter.getRepositoryName(working), (err: unknown) => {
+        assert.ok(err instanceof GitHubApiError);
+        assert.equal(err.operation, 'resolveInstallationId');
+        assert.deepEqual(err.installationDiscovery?.map(outcome => outcome.repo), repos);
+        const outcomes = err.installationDiscovery!;
+        assert.equal(outcomes.find(outcome => outcome.repo.name === 'gone')?.status, 404);
+        const transient = outcomes.find(outcome => outcome.repo.name === 'working')!;
+        assert.equal(transient.rateLimited, scenario.startsWith('403') || scenario === '429');
+        assert.equal(transient.status, scenario === 'missing id' ? 0 : scenario === 'network' ? 500 : Number(scenario.slice(0, 3)));
+        return true;
+      });
+      recovered = true;
+      t.mock.timers.tick(4_999);
+      await Promise.all(repos.map((repo) => assert.rejects(adapter.getRepositoryName(repo))));
+      assert.equal(discoveries, 2, 'shared deadline is retained');
+      a.start();
+      t.mock.timers.tick(5_000);
+      await a.stop();
+      assert.equal(a.available(working), true, 'recover on transient retry, not the hourly check');
+      assert.equal(a.available(gone), false);
+      assert.equal(discoveries, reversed ? 4 : 3);
+      assert.equal(metadataRequests, 2);
+      assert.deepEqual(events.map((e) => [e.kind, e.repo.name]), [['repo.unavailable', 'gone']],
+        'only own definitive metadata emits an outage; no spurious installation recovery');
+    });
+  }
+}
+
+test('20 repo probes share failed installation discovery and backoff, then recover through a healthy sibling', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setInterval'] });
+  const repos = Array.from({ length: 20 }, (_, i) => ({ owner: 'anima-research', name: `repo${i}` }));
+  let discoveryRequests = 0;
+  let metadataRequests = 0;
+  let mints = 0;
+  let recovered = false;
+  const adapter = new GitHubAdapter({ ...config(), installationId: null, repos }, {
+    logger: silentLogger(),
+    fetch: async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith('/installation')) {
+        discoveryRequests++;
+        if (recovered && path === '/repos/anima-research/repo19/installation') {
+          return Response.json({ id: INSTALLATION_ID });
+        }
+        return Response.json({ message: 'unavailable' }, { status: 503 });
+      }
+      if (path === `/app/installations/${INSTALLATION_ID}/access_tokens`) {
+        mints++;
+        return Response.json({ token: TOKEN, expires_at: new Date(Date.now() + 3_600_000).toISOString() });
+      }
+      assert.match(path, /^\/repos\/anima-research\/repo\d+$/);
+      metadataRequests++;
+      return Response.json({ full_name: path.slice('/repos/'.length) });
+    },
+  });
+  const events: NormalizedEvent[] = [];
+  const a = new RepoAvailability(repos, (repo) => adapter.getRepositoryName(repo), async (e) => { events.push(e); });
+  t.after(() => a.stop());
+  await a.initialize();
+  assert.equal(discoveryRequests, 20, 'one traversal, not 400 requests at startup');
+  let sweeps = 1;
+  for (const delay of [5_000, 10_000, 20_000, 40_000, 60_000, 60_000]) {
+    a.start();
+    t.mock.timers.tick(delay - 1);
+    // Even direct/concurrent probes cannot bypass the shared discovery deadline.
+    await Promise.all(repos.map((repo) => assert.rejects(adapter.getRepositoryName(repo), /503/)));
+    assert.equal(discoveryRequests, 20 * sweeps);
+    t.mock.timers.tick(1);
+    await a.stop();
+    sweeps++;
+    assert.equal(discoveryRequests, 20 * sweeps, 'at most one traversal per retry deadline');
+  }
+  assert.equal(metadataRequests, 0);
+  assert.equal(mints, 0);
+  assert.deepEqual(events, []);
+  assert.ok(repos.every((repo) => !a.available(repo)));
+
+  recovered = true;
+  t.mock.timers.tick(60_000);
+  // A burst still shares the in-flight mint; sequential availability probes use its cache.
+  await Promise.all(repos.map((repo) => adapter.getRepositoryName(repo)));
+  assert.equal(discoveryRequests, 20 * (sweeps + 1), 'fallback reaches the last healthy sibling');
+  await a.recheck();
+  assert.ok(repos.every((repo) => a.available(repo)));
+  assert.equal(mints, 1);
+  assert.equal(metadataRequests, 40);
+  assert.deepEqual(events, [], 'unknown to healthy remains silent');
+  await a.recheck();
+  assert.equal(discoveryRequests, 20 * (sweeps + 1), 'successful discovery stays cached');
+});
+
+for (const operation of ['search', 'list', 'resolveReviewThread', 'unresolveReviewThread'] as const) {
+  test(`${operation} refuses identities other than the configured entry's current canonical target without quarantining it`, async () => {
+    let a!: RepoAvailability;
+    const r = await rig({ onRepositoryResolved: (repo, name) => a.confirm(repo, name) });
+    r.fake.on('GET /repos/anima-research/rayforce', { body: { full_name: 'new-owner/current' } });
+    const events: NormalizedEvent[] = [];
+    a = new RepoAvailability([REPO], (repo) => r.adapter.getRepositoryName(repo), async (e) => { events.push(e); });
+    await a.initialize();
+    const api = a.guard(r.adapter);
+    for (const actual of ['other/unrelated', 'anima-research/rayforce']) {
+      r.fake.on('GET /search/issues', { body: { items: [{ ...ISSUE_PAYLOAD, repository_url: `${r.fake.baseUrl}/repos/${actual}` }] } });
+      r.fake.on('POST /graphql', (req) => {
+        assert.ok(!String(req.body.query).startsWith('mutation'), 'unrelated nodes must never be mutated');
+        return { body: { data: {
+          repository: { nameWithOwner: actual, pullRequest: { reviewThreads: { nodes: [] } } },
+          node: { pullRequest: { number: 12, repository: { nameWithOwner: actual } } },
+        } } };
+      });
+      await assert.rejects(operation === 'search' ? api.searchIssues(REPO, 'test')
+        : operation === 'list' ? api.listReviewThreads(PULL) : api[operation](PULL, 'UNRELATED'), /identity.*current target/);
+      assert.equal(a.available(REPO), true, 'bad data is not proof the configured entry is unavailable');
+    }
+    assert.deepEqual(events.map((e) => e.kind), ['repo.renamed']);
+    await assert.rejects(api.getIssue({ repo: { owner: 'new-owner', name: 'current' }, number: 7, kind: 'issue' }), /not validated/);
+  });
+}
+
+test('installation discovery follows a configured entry transfer with upstream redirect semantics', async () => {
+  const r = await rig({ env: { GITHUB_APP_INSTALLATION_ID: undefined } });
+  r.fake.on('GET /repos/anima-research/rayforce/installation', {
+    status: 301, headers: { location: `${r.fake.baseUrl}/repos/new-owner/current/installation` }, body: {},
+  });
+  r.fake.on('GET /repos/new-owner/current/installation', { body: { id: INSTALLATION_ID } });
+  assert.equal((await r.adapter.getIssue(ISSUE)).number, 7);
+  assert.equal(r.fake.for('GET /repos/new-owner/current/installation').length, 1);
+});
+
+for (const method of ['resolveReviewThread', 'unresolveReviewThread'] as const) {
+  test(`${method} resolves the canonical target before the final node check, including metadata backoff`, async () => {
+    const r = await rig();
+    const order: string[] = [];
+    r.fake.on('GET /repos/anima-research/rayforce', (_req, nth) => {
+      order.push('metadata');
+      if (nth === 0) return { status: 403, headers: { 'retry-after': '60' }, body: { message: 'rate limit' } };
+      return { body: { full_name: 'new-owner/current' } };
+    });
+    r.fake.on('POST /graphql', (req) => {
+      if (String(req.body.query).startsWith('mutation')) {
+        order.push('mutation');
+        return { body: { data: {} } };
+      }
+      order.push('node');
+      return { body: { data: { node: { pullRequest: {
+        number: 12, repository: { nameWithOwner: 'new-owner/current' },
+      } } } } };
+    });
+    await r.adapter[method](PULL, 'TRANSFERRED_NODE');
+    assert.deepEqual(r.sleeps, [60_000]);
+    assert.deepEqual(order, ['metadata', 'metadata', 'node', 'mutation']);
+  });
+}
